@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-04-10
+
+### Added
+
+- **Application Inference Profiles**: Per-user Bedrock inference profiles (one per user per model) providing server-side usage tracking via native CloudWatch metrics
+  - Provisioned automatically on first login via `ClaudeCode-InferenceProfileProvisioner` Lambda
+  - ABAC enforcement: each user can only invoke their own profiles (`aws:ResourceTag/user.email` must match caller's principal tag)
+  - Three default models: Opus 4.6, Sonnet 4.6, Haiku 4.5
+  - `ccwb profiles list` and `ccwb profiles set-default` commands for end users
+- **Server-side quota enforcement**: IAM tag-based quota enforcement on inference profiles
+  - `ClaudeCode-QuotaEnforcer` Lambda tags profiles `disabled` when usage exceeds limits
+  - IAM policy requires `aws:ResourceTag/status = enabled` on every `InvokeModel` call — not bypassable by clients
+  - Per-user, per-group, and default policies with daily/monthly limits
+  - `ClaudeCode-QuotaCheck` for real-time quota checks, `ClaudeCode-QuotaMonitor` for SNS alerts
+- **OTEL and Inference Profiles coexistence**: Both monitoring approaches can now run simultaneously
+  - OTEL handles session/activity metrics (code edits, tool usage, active time)
+  - Inference profiles handle token metrics server-side via Bedrock CloudWatch
+  - `filter/token_metrics` processor in OTEL collector drops `claude_code.token.usage` and `claude_code.cost.usage` to avoid double-counting
+  - Controlled by `FilterTokenMetrics` CFN parameter, set automatically by `ccwb deploy`
+  - New `otel_enabled` flag in profile config decouples OTEL from inference profiles
+- **BedrockMetricsBridge Lambda**: Bridges Bedrock CloudWatch metrics into the OTEL log group every 5 minutes for unified dashboard widgets
+
+### Changed
+
+- **Lambda naming convention**: All Lambda functions now use `ClaudeCode-` prefix with fixed names (not stack-name-dependent)
+  - `claude-code-quota-check` → `ClaudeCode-QuotaCheck`
+  - `claude-code-quota-enforcer` → `ClaudeCode-QuotaEnforcer`
+  - `claude-code-quota-monitor` → `ClaudeCode-QuotaMonitor`
+  - `${StackName}-inference-profile-provisioner` → `ClaudeCode-InferenceProfileProvisioner`
+- **Init wizard**: Inference profiles and OTEL are now independent choices (no longer mutually exclusive)
+- **Deploy command**: Deploys OTEL stacks when `otel_enabled=true` regardless of inference profiles; passes `FilterTokenMetrics=true` when both are active
+- **Package command**: OTEL helper build and settings.json telemetry gated on `otel_enabled` flag
+
+### Fixed
+
+- **Shiv .pyz installer crash**: Removed dev `config.json` from `source/credential_provider/` that was bundled into shiv archives, shadowing the real installed config and causing `Profile not found` errors during install
+- Fixed init process configuration flow for inference profiles
+- Fixed Lambda ARN missing in config after deployment
+- Fixed dashboard metrics publishing for inference profile monitoring
+
+### Documentation
+
+- Updated README with OTEL/inference profiles coexistence table, server-side quota enforcement, and ABAC session tag setup per IdP (Auth0, Okta, Azure/Entra, Cognito)
+- Added Auth0 Post-Login Action code for `https://aws.amazon.com/tags` session tags
+- Documented Okta Token Inline Hook and Cognito Identity Pool fallback strategies
+
+## [2.3.0] - 2026-04-02
+
+### Added
+
+- **Per-user quota monitoring**: Fine-grained token quota controls with daily/monthly limits, alert/block enforcement modes, and DynamoDB-backed quota policies
+- **SageMaker plugin**: Async inference skill for SageMaker endpoint integration
+- **Bedrock plugin**: Tool-use structured output skill for Bedrock model integration
+- **ML-training plugin**: GRPO fine-tuning skill for custom model training workflows
+- **Claude Opus 4.6 support**: New model added with EU/AU CRIS profile support and correct quota codes
+- **ALB JWT validation**: JWT validation for OTEL Collector endpoint via Application Load Balancer
+- **OIDC id_token caching**: Caches OIDC id_token to avoid redundant browser-based re-authentication on every credential refresh
+
+### Fixed
+
+- Fixed quota stack S3 bucket lookup targeting wrong CloudFormation stack
+- Fixed Auth0 issuer URL missing trailing slash for quota API JWT authorizer
+- Fixed vpc_config flattening and nested rebuild when loading existing profile
+- Fixed Opus 4.6 EU/AU entries missing from init.py display dicts and dashboard throttle metrics
+- Fixed OTEL telemetry UI freezes with two-layer caching on otel-helper
+- Fixed browser popup appearing every ~1h by caching OTEL headers indefinitely
+- Fixed id_token expiry buffer reduced from 10 minutes to 60 seconds
+- Fixed hardcoded legacy model IDs in test command replaced with configured inference profile
+
+### Other
+
+- Added comprehensive test suite with 176 passing tests
+- Added bandit, semgrep, cfn-nag, and scanner security workflows
+- Added stale PR/issue workflow (60-day policy)
+- Added CODEOWNERS file
+- Updated Dependabot configuration
+- Dependency updates: requests, urllib3, filelock, virtualenv, github-actions
+
+## [2.2.0] - 2026-04-02
+
+### Changed
+
+- **Version sync**: Bumped `source/pyproject.toml` to 2.2.0 to align with
+  the published release tag (no feature or bug-fix changes from v2.1.0)
+
 ## [2.1.0] - 2026-03-20
 
 ### Fixed

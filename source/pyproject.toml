@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "claude-code-with-bedrock"
-version = "2.1.0"
+version = "2.4.0"
 description = "Deploy and manage Claude Code on Amazon Bedrock"
 authors = ["Claude Code Team <claude-code@example.com>"]
 readme = "../README.md"
@@ -30,8 +30,8 @@ credential-provider = "credential_provider:main"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
-boto3 = "^1.28.0"
-requests = "^2.33.0"
+boto3 = "^1.42.83"
+requests = "^2.33.1"
 PyJWT = "^2.8.0"
 keyring = "^24.0.0"
 cryptography = ">=44.0.1"
@@ -51,11 +51,11 @@ ordered-set = "^4.1.0"
 zstandard = "^0.25.0"
 pyinstaller = "^6.19.0"
 shiv = "^1.0.0"
-ruff = "^0.15.8"
-mypy = "^1.19.1"
+ruff = "^0.15.9"
+mypy = "^1.20.0"
 types-requests = "*"
 pre-commit = "^4.5.1"
-cfn-lint = "^1.47.1"
+cfn-lint = "^1.48.1"
 yamllint = "^1.38.0"
 
 [build-system]

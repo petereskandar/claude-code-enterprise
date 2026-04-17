@@ -118,13 +118,22 @@ class PackageCommand(Command):
 
         # Validate platform
         valid_platforms = [
-            "macos", "macos-arm64", "macos-intel",
-            "macos-arm64 (pyinstaller)", "macos-arm64 (shiv)",
-            "macos-intel (pyinstaller)", "macos-intel (shiv)",
-            "linux", "linux-x64", "linux-arm64",
-            "linux-x64 (pyinstaller)", "linux-x64 (shiv)",
-            "linux-arm64 (pyinstaller)", "linux-arm64 (shiv)",
-            "windows", "all",
+            "macos",
+            "macos-arm64",
+            "macos-intel",
+            "macos-arm64 (pyinstaller)",
+            "macos-arm64 (shiv)",
+            "macos-intel (pyinstaller)",
+            "macos-intel (shiv)",
+            "linux",
+            "linux-x64",
+            "linux-arm64",
+            "linux-x64 (pyinstaller)",
+            "linux-x64 (shiv)",
+            "linux-arm64 (pyinstaller)",
+            "linux-arm64 (shiv)",
+            "windows",
+            "all",
         ]
         if isinstance(target_platform, list):
             for platform_name in target_platform:
@@ -325,8 +334,10 @@ class PackageCommand(Command):
             except Exception as e:
                 console.print(f"[yellow]Warning: Could not build credential process for {platform_name}: {e}[/yellow]")
 
-            # Build OTEL helper if monitoring is enabled
-            if profile.monitoring_enabled:
+            # Build OTEL helper if OTEL collector is deployed
+            # When only inference profiles are enabled (no OTEL), skip the helper
+            otel_enabled = (profile.monitoring_config or {}).get("otel_enabled", False)
+            if profile.monitoring_enabled and otel_enabled:
                 # Skip OTEL helper for Windows if being built in CodeBuild
                 if platform_name == "windows" and executable_path is None:
                     console.print("[dim]Windows OTEL helper will be built in CodeBuild[/dim]")
@@ -350,7 +361,7 @@ class PackageCommand(Command):
         console.print("\n[cyan]Creating configuration...[/cyan]")
         # Pass the appropriate identifier based on federation type
         federation_identifier = federated_role_arn if federation_type == "direct" else identity_pool_id
-        self._create_config(output_dir, profile, federation_identifier, federation_type, profile_name)
+        self._create_config(output_dir, profile, federation_identifier, federation_type, profile_name, console)
 
         # Create installer
         console.print("[cyan]Creating installer script...[/cyan]")
@@ -391,7 +402,7 @@ class PackageCommand(Command):
         if (output_dir / "install.bat").exists():
             console.print("  • install.bat - Installation script for Windows")
         console.print("  • README.md - Installation instructions")
-        if profile.monitoring_enabled and (output_dir / "claude-settings" / "settings.json").exists():
+        if built_otel_helpers and (output_dir / "claude-settings" / "settings.json").exists():
             console.print("  • claude-settings/settings.json - Claude Code telemetry settings")
             for platform_name, otel_helper_path in built_otel_helpers:
                 console.print(f"  • {otel_helper_path.name} - OTEL helper executable for {platform_name}")
@@ -568,7 +579,9 @@ class PackageCommand(Command):
         # Resolve the Poetry virtualenv so we can pass its site-packages to shiv
         venv_result = subprocess.run(
             ["poetry", "env", "info", "--path"],
-            capture_output=True, text=True, cwd=source_dir,
+            capture_output=True,
+            text=True,
+            cwd=source_dir,
         )
         if venv_result.returncode != 0:
             raise RuntimeError(f"Could not determine Poetry venv path: {venv_result.stderr}")
@@ -581,12 +594,21 @@ class PackageCommand(Command):
 
             # Install runtime deps into the temp dir
             pip_cmd = [
-                str(venv_path / "bin" / "pip"), "install",
-                "--target", str(tmp_site),
+                str(venv_path / "bin" / "pip"),
+                "install",
+                "--target",
+                str(tmp_site),
                 "--quiet",
-                "boto3", "requests", "PyJWT", "cryptography",
-                "keyring", "keyrings.alt", "pydantic", "pyyaml",
-                "six", "python-dateutil",
+                "boto3",
+                "requests",
+                "PyJWT",
+                "cryptography",
+                "keyring",
+                "keyrings.alt",
+                "pydantic",
+                "pyyaml",
+                "six",
+                "python-dateutil",
             ]
             pip_result = subprocess.run(pip_cmd, capture_output=not verbose, text=True)
             if pip_result.returncode != 0:
@@ -601,10 +623,13 @@ class PackageCommand(Command):
 
             shiv_cmd = [
                 str(venv_path / "bin" / "shiv"),
-                "--site-packages", str(tmp_site),
+                "--site-packages",
+                str(tmp_site),
                 "--compressed",
-                "-e", "credential_provider.__main__:main",
-                "-o", str(pyz_path),
+                "-e",
+                "credential_provider.__main__:main",
+                "-o",
+                str(pyz_path),
             ]
             shiv_result = subprocess.run(shiv_cmd, capture_output=not verbose, text=True, cwd=source_dir)
             if shiv_result.returncode != 0:
@@ -1219,16 +1244,22 @@ RUN mkdir -p /output && shiv \\
             (temp_path / "Dockerfile").write_text(dockerfile_content)
             # Create output dir inside container via entrypoint
             import time
+
             image_tag = f"ccwb-linux-{arch}-shiv-builder-{int(time.time())}"
 
             console.print(f"[yellow]Building Linux {arch} shiv bundle via Docker...[/yellow]")
             build_result = subprocess.run(
                 [
-                    "docker", "buildx", "build",
+                    "docker",
+                    "buildx",
+                    "build",
                     "--no-cache",
-                    "--platform", docker_platform,
-                    "-t", image_tag,
-                    "--load", ".",
+                    "--platform",
+                    docker_platform,
+                    "-t",
+                    image_tag,
+                    "--load",
+                    ".",
                 ],
                 cwd=temp_path,
                 capture_output=not verbose,
@@ -1241,7 +1272,8 @@ RUN mkdir -p /output && shiv \\
             container_name = f"ccwb-shiv-extract-{arch}-{int(time.time())}"
             run_result = subprocess.run(
                 ["docker", "create", "--name", container_name, image_tag],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if run_result.returncode != 0:
                 raise RuntimeError(f"Failed to create container: {run_result.stderr}")
@@ -1249,7 +1281,8 @@ RUN mkdir -p /output && shiv \\
             try:
                 copy_result = subprocess.run(
                     ["docker", "cp", f"{container_name}:/output/{binary_name}", str(output_dir)],
-                    capture_output=True, text=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if copy_result.returncode != 0:
                     raise RuntimeError(f"Failed to copy .pyz from container: {copy_result.stderr}")
@@ -1788,7 +1821,9 @@ RUN pyinstaller \
 
         venv_result = subprocess.run(
             ["poetry", "env", "info", "--path"],
-            capture_output=True, text=True, cwd=source_dir,
+            capture_output=True,
+            text=True,
+            cwd=source_dir,
         )
         if venv_result.returncode != 0:
             raise RuntimeError(f"Could not determine Poetry venv path: {venv_result.stderr}")
@@ -1799,10 +1834,14 @@ RUN pyinstaller \
             tmp_site.mkdir()
 
             pip_cmd = [
-                str(venv_path / "bin" / "pip"), "install",
-                "--target", str(tmp_site),
+                str(venv_path / "bin" / "pip"),
+                "install",
+                "--target",
+                str(tmp_site),
                 "--quiet",
-                "PyJWT", "cryptography", "six",
+                "PyJWT",
+                "cryptography",
+                "six",
             ]
             pip_result = subprocess.run(pip_cmd, capture_output=not verbose, text=True)
             if pip_result.returncode != 0:
@@ -1816,10 +1855,13 @@ RUN pyinstaller \
 
             shiv_cmd = [
                 str(venv_path / "bin" / "shiv"),
-                "--site-packages", str(tmp_site),
+                "--site-packages",
+                str(tmp_site),
                 "--compressed",
-                "-e", "otel_helper.__main__:main",
-                "-o", str(pyz_path),
+                "-e",
+                "otel_helper.__main__:main",
+                "-o",
+                str(pyz_path),
             ]
             shiv_result = subprocess.run(shiv_cmd, capture_output=not verbose, text=True, cwd=source_dir)
             if shiv_result.returncode != 0:
@@ -1856,7 +1898,9 @@ RUN pyinstaller \
 
         daemon_check = subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if daemon_check.returncode != 0:
-            console.print(f"\n[yellow]⚠️  Docker daemon not running - skipping Linux {arch} OTEL helper shiv build[/yellow]")
+            console.print(
+                f"\n[yellow]⚠️  Docker daemon not running - skipping Linux {arch} OTEL helper shiv build[/yellow]"
+            )
             return None
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1886,16 +1930,22 @@ RUN mkdir -p /output && shiv \\
             (temp_path / "Dockerfile").write_text(dockerfile_content)
 
             import time
+
             image_tag = f"ccwb-otel-{arch}-shiv-builder-{int(time.time())}"
 
             console.print(f"[yellow]Building Linux {arch} OTEL helper shiv bundle via Docker...[/yellow]")
             build_result = subprocess.run(
                 [
-                    "docker", "buildx", "build",
+                    "docker",
+                    "buildx",
+                    "build",
                     "--no-cache",
-                    "--platform", docker_platform,
-                    "-t", image_tag,
-                    "--load", ".",
+                    "--platform",
+                    docker_platform,
+                    "-t",
+                    image_tag,
+                    "--load",
+                    ".",
                 ],
                 cwd=temp_path,
                 capture_output=not verbose,
@@ -1906,10 +1956,12 @@ RUN mkdir -p /output && shiv \\
                 raise RuntimeError(f"Docker build failed for OTEL helper shiv: {build_result.stderr}")
 
             import time as _time
+
             container_name = f"ccwb-otel-shiv-extract-{arch}-{int(_time.time())}"
             run_result = subprocess.run(
                 ["docker", "create", "--name", container_name, image_tag],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if run_result.returncode != 0:
                 raise RuntimeError(f"Failed to create container: {run_result.stderr}")
@@ -1917,7 +1969,8 @@ RUN mkdir -p /output && shiv \\
             try:
                 copy_result = subprocess.run(
                     ["docker", "cp", f"{container_name}:/output/{binary_name}", str(output_dir)],
-                    capture_output=True, text=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if copy_result.returncode != 0:
                     raise RuntimeError(f"Failed to copy OTEL helper .pyz from container: {copy_result.stderr}")
@@ -2046,6 +2099,7 @@ RUN mkdir -p /output && shiv \\
         federation_identifier: str,
         federation_type: str = "cognito",
         profile_name: str = "ClaudeCode",
+        console=None,
     ) -> Path:
         """Create the configuration file.
 
@@ -2083,6 +2137,27 @@ RUN mkdir -p /output && shiv \\
         # Add selected_model if available
         if hasattr(profile, "selected_model") and profile.selected_model:
             config[profile_name]["selected_model"] = profile.selected_model
+
+        # Add confidential client fields for Azure AD if present.
+        # client_secret is never written to config.json — it lives in the OS keyring.
+        # End users set it with: credential-process --set-client-secret --profile <profile>
+        if getattr(profile, "azure_auth_mode", None):
+            config[profile_name]["azure_auth_mode"] = profile.azure_auth_mode
+        if getattr(profile, "client_certificate_path", None):
+            config[profile_name]["client_certificate_path"] = profile.client_certificate_path
+            config[profile_name]["client_certificate_key_path"] = profile.client_certificate_key_path
+            # Warn if the paths are absolute — they are machine-specific and will not
+            # resolve on end-user machines with different install layouts.
+            cert_is_absolute = Path(profile.client_certificate_path).is_absolute()
+            key_is_absolute = Path(profile.client_certificate_key_path).is_absolute()
+            if (cert_is_absolute or key_is_absolute) and console:
+                console.print(
+                    "\n[yellow]Warning: certificate paths in config.json are absolute and will not "
+                    "resolve on machines where the files are stored elsewhere.[/yellow]"
+                )
+                console.print("[yellow]Instruct end users to set the following environment variables:[/yellow]")
+                console.print("[dim]  AZURE_CLIENT_CERTIFICATE_PATH=<path/to/cert.pem>[/dim]")
+                console.print("[dim]  AZURE_CLIENT_CERTIFICATE_KEY_PATH=<path/to/key.pem>[/dim]\n")
 
         # Add inference profile configuration
         if getattr(profile, "inference_profiles_enabled", False):
@@ -2411,7 +2486,7 @@ done
 echo "✓ All inference profiles configured successfully"
 """
 
-        installer_content += f"""
+        installer_content += """
 echo
 echo "======================================"
 echo "✓ Installation complete!"
@@ -2427,7 +2502,7 @@ echo "  export AWS_PROFILE=<profile-name>"
 echo "  aws sts get-caller-identity"
 echo
 echo "Example:"
-FIRST_PROFILE=$(echo $PROFILES | awk '{{print $1}}')
+FIRST_PROFILE=$(echo $PROFILES | awk '{print $1}')
 echo "  export AWS_PROFILE=$FIRST_PROFILE"
 echo "  aws sts get-caller-identity"
 echo
@@ -2813,8 +2888,12 @@ Available metrics include:
                 # Set all 3 explicit model tier env vars
                 if prefix:
                     settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] = f"{prefix}.anthropic.claude-opus-4-6-v1"
-                    settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] = f"{prefix}.anthropic.claude-sonnet-4-6-20251120-v1:0"
-                    settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = f"{prefix}.anthropic.claude-haiku-4-5-20251001-v1:0"
+                    settings["env"][
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL"
+                    ] = f"{prefix}.anthropic.claude-sonnet-4-6-20251120-v1:0"
+                    settings["env"][
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+                    ] = f"{prefix}.anthropic.claude-haiku-4-5-20251001-v1:0"
                     settings["env"]["ANTHROPIC_SMALL_FAST_MODEL"] = f"{prefix}.anthropic.claude-haiku-4-5-20251001-v1:0"
                 else:
                     # No cross-region prefix — use the selected model for all
@@ -2823,8 +2902,9 @@ Available metrics include:
                     settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model_id
                     settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model_id
 
-            # If monitoring is enabled, add telemetry configuration
-            if profile.monitoring_enabled:
+            # If OTEL collector is deployed, add telemetry configuration
+            otel_enabled = (profile.monitoring_config or {}).get("otel_enabled", False)
+            if profile.monitoring_enabled and otel_enabled:
                 # Get monitoring stack outputs
                 monitoring_stack = profile.stack_names.get("monitoring", f"{profile.identity_pool_name}-otel-collector")
                 cmd = [

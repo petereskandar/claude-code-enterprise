@@ -1,0 +1,90 @@
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.spec
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
+# AWS credentials (safety)
+.aws/credentials
+.aws/config
+
+# Dev/test config that must not be bundled into shiv .pyz builds
+source/credential_provider/config.json
+
+# Local environment files
+.env
+.env.local
+
+# Kiro settings
+.kiro/
+
+# Claude Code settings
+.claude/
+
+#Claude Code plugin settings
+.claude-plugin
+
+# Kiro settings (contains tokens)
+.kiro/settings/mcp.json
+
+# Local documentation and feedback
+FEEDBACK.md
+
+# Temporary test files (root-level scratch files only, not source/tests/)
+output.json
+*.bak
+/test_*.py
+
+CLAUDE.md
+
+guidance-docs/
+parameters.json
+
+# ccwb deployment config
+source/.ccwb-config/
+
+guidance-submission/
+tests/
+!source/tests/
+assets/docs/planning
+
+.pytest_cache/
+.ruff_cache/
+.coverage
+.epcc
+
+EPCC_*
+PRs/
+test_cognito_detection.py
+
+# Development documentation (not for production)
+TESTING_*.md
+IMPLEMENTATION_SUMMARY.md
+PARTITION_*.md
+FEEDBACK.md
+.claudeignore
+.mcp.json

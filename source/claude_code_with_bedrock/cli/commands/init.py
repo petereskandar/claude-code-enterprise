@@ -397,6 +397,77 @@ class InitCommand(Command):
             if not client_id:
                 return None
 
+            # Confidential client configuration (Azure AD / Entra ID only)
+            client_secret = None
+            client_certificate_path = None
+            client_certificate_key_path = None
+
+            if provider_type == "azure":
+                console.print("\n[bold]Azure AD Authentication Mode[/bold]")
+                console.print(
+                    "Some enterprise Entra ID tenants disable public client flows.\n"
+                    "If yours does, configure a confidential client here.\n"
+                )
+
+                auth_mode = questionary.select(
+                    "Select authentication mode:",
+                    choices=[
+                        questionary.Choice("Public client (default, no secret required)", value="public"),
+                        questionary.Choice("Confidential client — client secret", value="secret"),
+                        questionary.Choice(
+                            "Confidential client — certificate (recommended for enterprise)", value="certificate"
+                        ),
+                    ],
+                    default=config.get("azure_auth_mode", "public"),
+                ).ask()
+
+                if not auth_mode:
+                    return None
+
+                if auth_mode == "secret":
+                    client_secret = questionary.password(
+                        "Enter your client secret:",
+                        validate=lambda x: bool(x) or "Client secret cannot be empty",
+                    ).ask()
+                    if not client_secret:
+                        return None
+                    import keyring as _keyring
+
+                    _keyring.set_password("claude-code-with-bedrock", f"{profile_name}-client-secret", client_secret)
+                    console.print("[dim]  ✓ Client secret stored in OS secure storage (not written to config)[/dim]")
+                    console.print(
+                        "[dim]  Distribute to end users: they must run[/dim]\n"
+                        "[dim]    credential-process --set-client-secret --profile <profile>[/dim]\n"
+                        "[dim]  to store the secret on their machine.[/dim]"
+                    )
+
+                elif auth_mode == "certificate":
+                    console.print(
+                        "\n[dim]Generate a self-signed cert with:[/dim]\n"
+                        "[dim]  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes[/dim]\n"
+                        "[dim]Then upload cert.pem to your app registration → Certificates & secrets.[/dim]\n"
+                    )
+                    client_certificate_path = questionary.text(
+                        "Path to certificate PEM file:",
+                        validate=lambda x: bool(x) or "Certificate path cannot be empty",
+                        default=config.get("client_certificate_path", ""),
+                    ).ask()
+                    if not client_certificate_path:
+                        return None
+
+                    client_certificate_key_path = questionary.text(
+                        "Path to private key PEM file:",
+                        validate=lambda x: bool(x) or "Key path cannot be empty",
+                        default=config.get("client_certificate_key_path", ""),
+                    ).ask()
+                    if not client_certificate_key_path:
+                        return None
+
+                config["azure_auth_mode"] = auth_mode
+                # client_secret is never written to config — it lives in the OS keyring
+                config["client_certificate_path"] = client_certificate_path
+                config["client_certificate_key_path"] = client_certificate_key_path
+
             # Credential Storage Method
             console.print("\n[bold]Credential Storage Method[/bold]")
             console.print("Choose how to store AWS credentials locally:")
@@ -546,23 +617,52 @@ class InitCommand(Command):
             config["monitoring"]["enabled"] = enable_monitoring
 
             # Ask whether to use Application Inference Profiles (server-side CloudWatch metrics)
-            # or the OTEL collector (client-side, requires ECS Fargate + VPC).
+            # for token tracking. This can coexist with OTEL — when both are enabled,
+            # OTEL handles session/activity metrics while inference profiles handle token metrics.
             using_inference_profiles = False
             if enable_monitoring:
                 existing_ip_enabled = config.get("inference_profiles", {}).get("enabled", False)
-                console.print("\n[bold]Metrics Collection Method[/bold]")
-                console.print("  • [cyan]Application Inference Profiles[/cyan]: server-side CloudWatch metrics — no VPC or collector needed")
-                console.print("  • [dim]OpenTelemetry collector[/dim]: client-side metrics via ECS Fargate — requires VPC")
+                console.print("\n[bold]Application Inference Profiles[/bold]")
+                console.print(
+                    "  Server-side token tracking via CloudWatch — no VPC or collector needed for token metrics."
+                )
+                console.print(
+                    "  Can be combined with OpenTelemetry for session/activity metrics."
+                )
                 using_inference_profiles = questionary.confirm(
-                    "Use Application Inference Profiles for CloudWatch metrics (recommended)?",
+                    "Enable Application Inference Profiles for server-side token metrics (recommended)?",
                     default=existing_ip_enabled if existing_ip_enabled else True,
                 ).ask()
                 if "inference_profiles" not in config:
                     config["inference_profiles"] = {}
                 config["inference_profiles"]["enabled"] = using_inference_profiles
 
-            # Only configure VPC + OTEL collector when NOT using Application Inference Profiles
-            if enable_monitoring and not using_inference_profiles:
+            # Ask whether to deploy the OTEL collector for session/activity metrics.
+            # When inference profiles are also enabled, token metrics are filtered out
+            # from the OTEL pipeline to avoid double-counting.
+            enable_otel = False
+            if enable_monitoring:
+                if using_inference_profiles:
+                    console.print("\n[bold]OpenTelemetry Collector (session & activity metrics)[/bold]")
+                    console.print(
+                        "  Token metrics are already covered by inference profiles."
+                    )
+                    console.print(
+                        "  OTEL adds session-level metrics (active time, code edits, tool usage)."
+                    )
+                    console.print("  Requires ECS Fargate + VPC.")
+                    enable_otel = questionary.confirm(
+                        "Also deploy OpenTelemetry collector for session/activity metrics?",
+                        default=config.get("monitoring", {}).get("otel_enabled", False),
+                    ).ask()
+                else:
+                    # No inference profiles — OTEL is the only metrics source
+                    enable_otel = True
+
+                config["monitoring"]["otel_enabled"] = enable_otel
+
+            # Configure VPC + OTEL collector when OTEL is enabled
+            if enable_monitoring and enable_otel:
                 # Pass existing vpc_config if available
                 existing_vpc_config = config.get("monitoring", {}).get("vpc_config")
                 vpc_config = self._configure_vpc(
@@ -987,13 +1087,14 @@ class InitCommand(Command):
                 certificate_arn = questionary.text(
                     "ACM certificate ARN (must be in the same region as this deployment):",
                     default=existing_cert_arn,
-                    validate=lambda text: text.strip().startswith("arn:aws")
-                    or "Must be a valid ACM certificate ARN",
+                    validate=lambda text: text.strip().startswith("arn:aws") or "Must be a valid ACM certificate ARN",
                 ).ask()
                 console.print(f"[green]✓[/green] Using existing certificate: {certificate_arn}")
             else:
                 console.print("[dim]A new ACM certificate will be created via DNS validation.[/dim]")
-                console.print("[dim]You'll need to add a CNAME record to your DNS provider after deployment starts.[/dim]")
+                console.print(
+                    "[dim]You'll need to add a CNAME record to your DNS provider after deployment starts.[/dim]"
+                )
 
             # Check for Route53 hosted zones
             console.print("\n[bold]Route53 Configuration[/bold]")
@@ -1485,6 +1586,8 @@ class InitCommand(Command):
             monitoring_config["custom_domain"] = monitoring_dict["custom_domain"]
         if monitoring_dict.get("hosted_zone_id"):
             monitoring_config["hosted_zone_id"] = monitoring_dict["hosted_zone_id"]
+        if "otel_enabled" in monitoring_dict:
+            monitoring_config["otel_enabled"] = monitoring_dict["otel_enabled"]
 
         profile = Profile(
             name=profile_name,
@@ -1510,6 +1613,9 @@ class InitCommand(Command):
             cognito_user_pool_id=config_data.get("cognito_user_pool_id"),
             federation_type=config_data.get("federation_type", "cognito"),
             max_session_duration=config_data.get("max_session_duration", 28800),
+            azure_auth_mode=config_data.get("azure_auth_mode"),
+            client_certificate_path=config_data.get("client_certificate_path"),
+            client_certificate_key_path=config_data.get("client_certificate_key_path"),
             enable_codebuild=config_data.get("codebuild", {}).get("enabled", False),
             enable_distribution=config_data.get("distribution", {}).get("enabled", False),
             distribution_type=config_data.get("distribution", {}).get("type"),
@@ -1788,6 +1894,9 @@ class InitCommand(Command):
                     "hosted_zone_id": profile.monitoring_config.get("hosted_zone_id")
                     if profile.monitoring_config
                     else None,
+                    "otel_enabled": profile.monitoring_config.get("otel_enabled", False)
+                    if profile.monitoring_config
+                    else False,
                 },
             }
 
@@ -1845,6 +1954,14 @@ class InitCommand(Command):
             # Add analytics configuration if present
             if hasattr(profile, "analytics_enabled"):
                 existing_config["analytics"] = {"enabled": profile.analytics_enabled}
+
+            # Preserve confidential client configuration if present
+            # client_secret is never written to config — it lives in the OS keyring
+            if getattr(profile, "azure_auth_mode", None):
+                existing_config["azure_auth_mode"] = profile.azure_auth_mode
+            if getattr(profile, "client_certificate_path", None):
+                existing_config["client_certificate_path"] = profile.client_certificate_path
+                existing_config["client_certificate_key_path"] = profile.client_certificate_key_path
 
             # Add selected source region if present
             if hasattr(profile, "selected_source_region") and profile.selected_source_region:
