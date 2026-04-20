@@ -264,6 +264,34 @@ After building packages, you can share them with users in three ways:
 
 See [Distribution Comparison](assets/docs/distribution/comparison.md) for detailed setup guides.
 
+### Admin Console (Optional)
+
+A web-based admin console for managing users and quotas in real time. Follows the same ALB + OIDC + Lambda architecture as the landing page.
+
+**Capabilities:**
+
+- View all active users with current month token usage and quota status
+- Filter users by email
+- Create new user quota policies
+- Edit quota limits (monthly/daily) and enforcement mode
+- Block users instantly (sets quota to 0, immediately disables inference profiles)
+- Delete users (removes policy and cleans up inference profiles)
+- Dashboard stats: total users, active this month, over quota, blocked
+
+**Architecture:** ALB with OIDC authentication → Lambda (Python 3.12) → DynamoDB (QuotaPolicies + UserQuotaMetrics) + Bedrock API (inference profile tagging). The Lambda serves both the SPA HTML and the REST API (`/api/users/*`).
+
+**Setup:**
+
+```bash
+# Enable during initial setup
+poetry run ccwb init    # answer "Yes" to "Enable admin console?"
+
+# Or deploy standalone
+poetry run ccwb deploy admin-console
+```
+
+The ALB can be deployed as internet-facing or internal (private VPC only). A custom domain with HTTPS is required for OIDC authentication. Supports all four IdP providers (Okta, Azure AD, Auth0, Cognito).
+
 ### Monitoring Infrastructure (Optional)
 
 Enable usage visibility with OpenTelemetry monitoring stack:
