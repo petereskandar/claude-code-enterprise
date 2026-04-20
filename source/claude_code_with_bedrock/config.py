@@ -52,6 +52,17 @@ class Profile:
 
     # Quota monitoring configuration
     quota_monitoring_enabled: bool = False  # Enable per-user token quota monitoring
+
+    # Admin console configuration
+    admin_console_enabled: bool = False  # Enable admin console web UI
+    admin_console_idp_provider: str | None = None  # "okta" | "azure" | "auth0" | "cognito"
+    admin_console_idp_domain: str | None = None  # IdP domain for web auth
+    admin_console_idp_client_id: str | None = None  # Web application client ID
+    admin_console_idp_client_secret_arn: str | None = None  # Secrets Manager ARN for client secret
+    admin_console_custom_domain: str | None = None  # Custom domain (e.g., "admin.company.com")
+    admin_console_hosted_zone_id: str | None = None  # Optional Route53 hosted zone ID
+    admin_console_certificate_arn: str | None = None  # Optional existing ACM certificate ARN
+    admin_console_alb_scheme: str = "internet-facing"  # "internet-facing" or "internal"
     monthly_token_limit: int = 225000000  # Monthly token limit per user (225M default)
     warning_threshold_80: int = 180000000  # Warning threshold at 80% (180M default)
     warning_threshold_90: int = 202500000  # Critical threshold at 90% (202.5M default)

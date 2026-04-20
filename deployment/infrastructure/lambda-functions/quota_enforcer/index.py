@@ -57,12 +57,20 @@ def lambda_handler(event, context):
         daily_limit = policy.get("daily_token_limit")
         enforcement_mode = policy.get("enforcement_mode", "alert")
 
-        if enforcement_mode != "block" or monthly_limit <= 0:
+        if enforcement_mode != "block" or monthly_limit < 0:
             # Policy exists but enforcement is alert-only — ensure profiles are enabled
             for arn in arns:
                 _set_status_tag(arn, "enabled")
             enabled_count += len(arns)
             print(f"  ALLOWED {email}: enforcement_mode={enforcement_mode} → {len(arns)} profile(s) tagged status=enabled")
+            continue
+
+        # monthly_limit == 0 with enforcement == "block" means admin explicitly blocked this user
+        if monthly_limit == 0:
+            for arn in arns:
+                _set_status_tag(arn, "disabled")
+            disabled_count += len(arns)
+            print(f"  BLOCKED {email}: quota set to 0 (admin block) → {len(arns)} profile(s) tagged status=disabled")
             continue
 
         usage = _get_user_usage(email, current_month, current_date)

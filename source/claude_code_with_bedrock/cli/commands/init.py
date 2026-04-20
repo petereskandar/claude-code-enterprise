@@ -1161,6 +1161,175 @@ class InitCommand(Command):
         elif distribution_type == "presigned-s3":
             console.print("[green]✓[/green] Presigned S3 distribution will be deployed")
 
+        # ── Admin Console ──
+        console.print("\n[bold]Admin Console[/bold]")
+        console.print("Deploy a web-based admin console for managing users and quotas.")
+
+        enable_admin_console = questionary.confirm(
+            "Enable admin console?",
+            default=config.get("admin_console", {}).get("enabled", False),
+        ).ask()
+
+        if "admin_console" not in config:
+            config["admin_console"] = {}
+        config["admin_console"]["enabled"] = enable_admin_console
+
+        if enable_admin_console:
+            console.print("\n[bold]Admin Console Configuration[/bold]")
+            console.print("Configure IdP authentication for the admin console")
+
+            # Check if we can reuse distribution IdP settings
+            reuse_idp = False
+            if distribution_type == "landing-page" and config.get("distribution", {}).get("idp_provider"):
+                reuse_idp = questionary.confirm(
+                    "Reuse the same IdP configuration from the landing page?",
+                    default=True,
+                ).ask()
+
+            if reuse_idp:
+                dist = config["distribution"]
+                admin_idp_provider = dist["idp_provider"]
+                admin_idp_domain = dist["idp_domain"]
+                admin_idp_client_id = dist["idp_client_id"]
+                admin_secret_arn = dist["idp_client_secret_arn"]
+                console.print(f"[green]✓[/green] Reusing {admin_idp_provider} IdP configuration")
+            else:
+                # IdP provider selection
+                admin_idp_choices = [
+                    questionary.Choice("Okta", value="okta"),
+                    questionary.Choice("Azure AD / Entra ID", value="azure"),
+                    questionary.Choice("Auth0", value="auth0"),
+                    questionary.Choice("AWS Cognito User Pool", value="cognito"),
+                ]
+
+                admin_idp_provider = questionary.select(
+                    "Identity provider for admin console authentication:",
+                    choices=admin_idp_choices,
+                    default=config.get("admin_console", {}).get("idp_provider", "okta"),
+                ).ask()
+
+                admin_idp_domain = questionary.text(
+                    "IdP domain (e.g., company.okta.com):",
+                    default=config.get("admin_console", {}).get("idp_domain", ""),
+                ).ask()
+
+                admin_idp_client_id = questionary.text(
+                    "Web application client ID:",
+                    default=config.get("admin_console", {}).get("idp_client_id", ""),
+                ).ask()
+
+                admin_idp_client_secret = questionary.password(
+                    "Web application client secret:",
+                ).ask()
+
+                # Store secret in Secrets Manager
+                import boto3
+
+                region = locals().get("region") or config.get("aws", {}).get("region") or get_current_region()
+                try:
+                    secrets_client = boto3.client("secretsmanager", region_name=region)
+                    account_id = boto3.client("sts").get_caller_identity()["Account"]
+                    secret_name = f"{config['aws']['identity_pool_name']}-admin-console-idp-secret"
+
+                    try:
+                        secret_response = secrets_client.create_secret(
+                            Name=secret_name,
+                            SecretString=admin_idp_client_secret,
+                            Description=f"IdP client secret for "
+                            f"{config['aws']['identity_pool_name']} admin console",
+                        )
+                        admin_secret_arn = secret_response["ARN"]
+                    except secrets_client.exceptions.ResourceExistsException:
+                        secrets_client.update_secret(
+                            SecretId=secret_name,
+                            SecretString=admin_idp_client_secret,
+                        )
+                        admin_secret_arn = f"arn:aws:secretsmanager:{region}:{account_id}:secret:{secret_name}"
+
+                    console.print(f"[green]✓[/green] IdP client secret stored in Secrets Manager: {secret_name}")
+                except Exception as e:
+                    console.print(f"[red]Error storing secret: {e}[/red]")
+                    admin_secret_arn = ""
+
+            # Custom domain (REQUIRED)
+            console.print("\n[bold]Admin Console Domain (REQUIRED)[/bold]")
+            console.print("[yellow]⚠️  Custom domain with HTTPS is required for ALB OIDC authentication[/yellow]")
+
+            admin_custom_domain = questionary.text(
+                "Custom domain (e.g., admin.company.com):",
+                default=config.get("admin_console", {}).get("custom_domain", ""),
+                validate=lambda text: len(text.strip()) > 0
+                or "Custom domain is required for admin console",
+            ).ask()
+
+            # ALB scheme
+            alb_scheme_choices = [
+                questionary.Choice("Internet-facing (accessible from public internet)", value="internet-facing"),
+                questionary.Choice("Internal (private VPC only, requires VPN/Direct Connect)", value="internal"),
+            ]
+            admin_alb_scheme = questionary.select(
+                "ALB access type:",
+                choices=alb_scheme_choices,
+                default=config.get("admin_console", {}).get("alb_scheme", "internet-facing"),
+            ).ask()
+
+            # ACM Certificate
+            console.print("\n[bold]ACM Certificate[/bold]")
+            existing_cert_arn = config.get("admin_console", {}).get("certificate_arn", "")
+            use_existing_cert = questionary.confirm(
+                "Do you have an existing ACM certificate for this domain?",
+                default=bool(existing_cert_arn),
+            ).ask()
+
+            admin_certificate_arn = None
+            if use_existing_cert:
+                admin_certificate_arn = questionary.text(
+                    "ACM certificate ARN:",
+                    default=existing_cert_arn,
+                    validate=lambda text: text.strip().startswith("arn:aws") or "Must be a valid ACM certificate ARN",
+                ).ask()
+            else:
+                console.print("[dim]A new ACM certificate will be created via DNS validation.[/dim]")
+
+            # Route53 hosted zone
+            admin_hosted_zone_id = None
+            try:
+                import boto3
+
+                route53_client = boto3.client("route53")
+                zones_response = route53_client.list_hosted_zones()
+                hosted_zones = zones_response.get("HostedZones", [])
+
+                if hosted_zones:
+                    zone_choices = [
+                        questionary.Choice(
+                            f"{zone['Name']} (ID: {zone['Id'].split('/')[-1]})", value=zone["Id"].split("/")[-1]
+                        )
+                        for zone in hosted_zones
+                    ]
+                    zone_choices.append(questionary.Choice("Skip (no Route53 managed domain)", value=None))
+
+                    admin_hosted_zone_id = questionary.select(
+                        "Select Route53 hosted zone for admin console:",
+                        choices=zone_choices,
+                        default=zone_choices[0],
+                    ).ask()
+            except Exception:
+                admin_hosted_zone_id = None
+
+            config["admin_console"].update({
+                "idp_provider": admin_idp_provider,
+                "idp_domain": admin_idp_domain,
+                "idp_client_id": admin_idp_client_id,
+                "idp_client_secret_arn": admin_secret_arn,
+                "custom_domain": admin_custom_domain,
+                "certificate_arn": admin_certificate_arn,
+                "hosted_zone_id": admin_hosted_zone_id,
+                "alb_scheme": admin_alb_scheme,
+            })
+
+            console.print("\n[green]✓[/green] Admin console will be deployed with IdP authentication")
+
         # Bedrock model and cross-region configuration
         if not skip_bedrock:
             console.print("\n[bold blue]Step 3: Bedrock Model Selection[/bold blue]")
@@ -1627,6 +1796,15 @@ class InitCommand(Command):
             distribution_hosted_zone_id=config_data.get("distribution", {}).get("hosted_zone_id"),
             distribution_certificate_arn=config_data.get("distribution", {}).get("certificate_arn"),
             inference_profiles_enabled=config_data.get("inference_profiles", {}).get("enabled", False),
+            admin_console_enabled=config_data.get("admin_console", {}).get("enabled", False),
+            admin_console_idp_provider=config_data.get("admin_console", {}).get("idp_provider"),
+            admin_console_idp_domain=config_data.get("admin_console", {}).get("idp_domain"),
+            admin_console_idp_client_id=config_data.get("admin_console", {}).get("idp_client_id"),
+            admin_console_idp_client_secret_arn=config_data.get("admin_console", {}).get("idp_client_secret_arn"),
+            admin_console_custom_domain=config_data.get("admin_console", {}).get("custom_domain"),
+            admin_console_hosted_zone_id=config_data.get("admin_console", {}).get("hosted_zone_id"),
+            admin_console_certificate_arn=config_data.get("admin_console", {}).get("certificate_arn"),
+            admin_console_alb_scheme=config_data.get("admin_console", {}).get("alb_scheme", "internet-facing"),
             quota_monitoring_enabled=(
                 config_data.get("quota", {}).get("enabled", False)
                 if config_data.get("monitoring", {}).get("enabled")

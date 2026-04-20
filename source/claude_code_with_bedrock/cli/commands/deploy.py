@@ -147,10 +147,17 @@ class DeployCommand(Command):
                 else:
                     console.print("[yellow]CodeBuild is not enabled in your configuration.[/yellow]")
                     return 1
+            elif stack_arg == "admin-console":
+                if getattr(profile, "admin_console_enabled", False):
+                    stacks_to_deploy.append(("admin-console", "Admin Console (User & Quota Management)"))
+                else:
+                    console.print("[yellow]Admin console is not enabled in your configuration.[/yellow]")
+                    console.print("Run 'poetry run ccwb init' and enable the admin console.")
+                    return 1
             else:
                 console.print(f"[red]Unknown stack: {stack_arg}[/red]")
                 console.print(
-                    "Valid stacks: auth, distribution, networking, monitoring, dashboard, analytics, quota, s3bucket, codebuild\n"
+                    "Valid stacks: auth, distribution, networking, monitoring, dashboard, analytics, quota, s3bucket, codebuild, admin-console\n"
                 )
                 console.print("[dim]Tip: Use 'ccwb deploy' without arguments to deploy all enabled stacks.[/dim]")
                 console.print("[dim]Use 'ccwb deploy quota' for quota-specific updates or late enablement.[/dim]")
@@ -194,6 +201,14 @@ class DeployCommand(Command):
             # Check if CodeBuild is enabled
             if getattr(profile, "enable_codebuild", False):
                 stacks_to_deploy.append(("codebuild", "CodeBuild for Windows binary builds"))
+
+            # Check if admin console is enabled
+            if getattr(profile, "admin_console_enabled", False):
+                # Admin console uses ALB which requires a VPC — ensure networking is in the plan
+                already_has_networking = any(s[0] == "networking" for s in stacks_to_deploy)
+                if not already_has_networking:
+                    stacks_to_deploy.insert(1, ("networking", "VPC Networking for ALB (admin console)"))
+                stacks_to_deploy.append(("admin-console", "Admin Console (User & Quota Management)"))
 
         # Initialize CloudFormation manager
         cf_manager = CloudFormationManager(region=profile.aws_region)
@@ -948,6 +963,136 @@ class DeployCommand(Command):
                             os.unlink(packaged_template_path)
                         except Exception:
                             pass
+
+            elif stack_type == "admin-console":
+                template = project_root / "deployment" / "infrastructure" / "admin-console.yaml"
+                stack_name = profile.stack_names.get("admin-console", f"{profile.identity_pool_name}-admin-console")
+
+                # Get VPC outputs from networking stack
+                networking_stack_name = profile.stack_names.get(
+                    "networking", f"{profile.identity_pool_name}-networking"
+                )
+                networking_outputs = get_stack_outputs(networking_stack_name, profile.aws_region)
+
+                if not networking_outputs:
+                    console.print(
+                        "[red]Error: Networking stack outputs not found. Deploy networking stack first.[/red]"
+                    )
+                    return 1
+
+                vpc_id = networking_outputs.get("VpcId", "")
+                subnet_ids = networking_outputs.get("SubnetIds", "")
+
+                if not vpc_id or not subnet_ids:
+                    console.print("[red]Error: Missing required VPC/subnet outputs from networking stack.[/red]")
+                    return 1
+
+                public_subnets = subnet_ids
+                private_subnets = subnet_ids
+
+                params = [
+                    f"IdentityPoolName={profile.identity_pool_name}",
+                    f"VpcId={vpc_id}",
+                    f"PublicSubnetIds={public_subnets}",
+                    f"PrivateSubnetIds={private_subnets}",
+                    f"IdPProvider={profile.admin_console_idp_provider}",
+                    f"ALBScheme={getattr(profile, 'admin_console_alb_scheme', 'internet-facing')}",
+                ]
+
+                # DynamoDB table names (from quota stack or defaults)
+                params.append(f"QuotaPoliciesTableName={getattr(profile, 'quota_policies_table', None) or 'QuotaPolicies'}")
+                params.append(f"UserQuotaMetricsTableName={getattr(profile, 'user_quota_metrics_table', None) or 'UserQuotaMetrics'}")
+
+                # IdP-specific parameters — same pattern as landing-page distribution
+                secret_arn = profile.admin_console_idp_client_secret_arn or ""
+                if secret_arn.startswith("arn:"):
+                    secret_name_parts = secret_arn.split(":")
+                    active_secret_ref = secret_name_parts[-1] if len(secret_name_parts) >= 7 else secret_arn
+                else:
+                    active_secret_ref = secret_arn
+
+                if profile.admin_console_idp_provider == "okta":
+                    params.extend([
+                        f"OktaDomain={profile.admin_console_idp_domain}",
+                        f"OktaClientId={profile.admin_console_idp_client_id}",
+                        f"OktaClientSecretArn={active_secret_ref}",
+                        f"AzureClientSecretArn={active_secret_ref}",
+                        f"Auth0ClientSecretArn={active_secret_ref}",
+                        f"CognitoClientSecretArn={active_secret_ref}",
+                    ])
+                elif profile.admin_console_idp_provider == "azure":
+                    params.extend([
+                        f"AzureTenantId={profile.admin_console_idp_domain}",
+                        f"AzureClientId={profile.admin_console_idp_client_id}",
+                        f"AzureClientSecretArn={active_secret_ref}",
+                        f"OktaClientSecretArn={active_secret_ref}",
+                        f"Auth0ClientSecretArn={active_secret_ref}",
+                        f"CognitoClientSecretArn={active_secret_ref}",
+                    ])
+                elif profile.admin_console_idp_provider == "auth0":
+                    params.extend([
+                        f"Auth0Domain={profile.admin_console_idp_domain}",
+                        f"Auth0ClientId={profile.admin_console_idp_client_id}",
+                        f"Auth0ClientSecretArn={active_secret_ref}",
+                        f"OktaClientSecretArn={active_secret_ref}",
+                        f"AzureClientSecretArn={active_secret_ref}",
+                        f"CognitoClientSecretArn={active_secret_ref}",
+                    ])
+                elif profile.admin_console_idp_provider == "cognito":
+                    params.extend([
+                        f"CognitoUserPoolId={profile.cognito_user_pool_id or ''}",
+                        f"CognitoUserPoolDomain={profile.admin_console_idp_domain}",
+                        f"CognitoClientId={profile.admin_console_idp_client_id}",
+                        f"CognitoClientSecretArn={active_secret_ref}",
+                        f"OktaClientSecretArn={active_secret_ref}",
+                        f"AzureClientSecretArn={active_secret_ref}",
+                        f"Auth0ClientSecretArn={active_secret_ref}",
+                    ])
+
+                # Custom domain (required)
+                if profile.admin_console_custom_domain:
+                    params.append(f"CustomDomainName={profile.admin_console_custom_domain}")
+
+                # Existing ACM certificate
+                existing_cert_arn = getattr(profile, "admin_console_certificate_arn", None)
+                if existing_cert_arn:
+                    params.append(f"ExistingCertificateArn={existing_cert_arn}")
+
+                # Route53 hosted zone
+                hosted_zone_id = getattr(profile, "admin_console_hosted_zone_id", None)
+                if (
+                    hosted_zone_id
+                    and str(hosted_zone_id).strip().startswith(("Z", "z"))
+                    and " " not in str(hosted_zone_id)
+                ):
+                    params.append(f"HostedZoneId={hosted_zone_id}")
+
+                # Deployment timestamp
+                import datetime
+
+                deployment_timestamp = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+                params.append(f"DeploymentTimestamp={deployment_timestamp}")
+
+                result = deploy_with_cf(
+                    template,
+                    stack_name,
+                    params,
+                    ["CAPABILITY_NAMED_IAM"],
+                    task_description="Deploying admin console stack...",
+                )
+
+                if result == 0:
+                    outputs = get_stack_outputs(stack_name, profile.aws_region)
+                    console.print("\n[bold green]✓ Admin console deployed successfully![/bold green]")
+                    console.print(f"\n[bold]Admin Console URL:[/bold] {outputs.get('AdminConsoleURL', 'N/A')}")
+                    console.print("\n[bold yellow]⚠️  Configure your IdP web application:[/bold yellow]")
+                    console.print(f"   [cyan]Redirect URI:[/cyan] {outputs.get('IdPRedirectURI', 'N/A')}")
+                    console.print(
+                        "\n   Add this redirect URI to your IdP web application settings "
+                        "before admins can authenticate."
+                    )
+
+                return result
 
             elif stack_type == "codebuild":
                 template = project_root / "deployment" / "infrastructure" / "codebuild-windows.yaml"
