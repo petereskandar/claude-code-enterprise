@@ -197,7 +197,7 @@ def get_cache_path():
     """Get the path to the OTEL headers cache file."""
     cache_dir = Path.home() / ".claude-code-session"
     cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    profile = os.environ.get("AWS_PROFILE", "ClaudeCode")
+    profile = os.environ.get("AWS_PROFILE", "claude-code-default")
     return cache_dir / f"{profile}-otel-headers.json"
 
 
@@ -274,8 +274,8 @@ def get_token_via_credential_process():
         return None
 
     # Get profile name from AWS_PROFILE environment variable (set by Claude Code from settings.json)
-    # Fall back to "ClaudeCode" for backward compatibility
-    profile = os.environ.get("AWS_PROFILE", "ClaudeCode")
+    # Fall back to "claude-code-default" for backward compatibility
+    profile = os.environ.get("AWS_PROFILE", "claude-code-default")
 
     try:
         # Run credential process with --profile flag and --get-monitoring-token flag

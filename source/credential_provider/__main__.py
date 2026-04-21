@@ -80,7 +80,7 @@ class MultiProviderAuth:
 
         # Load configuration from environment or config file
         # Auto-detect profile from config.json if not specified
-        self.profile = profile or self._auto_detect_profile() or "ClaudeCode"
+        self.profile = profile or self._auto_detect_profile() or "claude-code-default"
 
         self.config = self._load_config()
 
@@ -605,12 +605,12 @@ class MultiProviderAuth:
         except Exception:
             return None
 
-    def save_to_credentials_file(self, credentials, profile="ClaudeCode"):
+    def save_to_credentials_file(self, credentials, profile="claude-code-default"):
         """Save credentials to ~/.aws/credentials file
 
         Args:
             credentials: Dict with AccessKeyId, SecretAccessKey, SessionToken, Expiration
-            profile: Profile name to use in credentials file (default: ClaudeCode)
+            profile: Profile name to use in credentials file (default: claude-code-default)
         """
         import tempfile
         from configparser import ConfigParser
@@ -668,7 +668,7 @@ class MultiProviderAuth:
         except Exception as e:
             raise Exception(f"Failed to save credentials to file: {str(e)}") from e
 
-    def read_from_credentials_file(self, profile="ClaudeCode"):
+    def read_from_credentials_file(self, profile="claude-code-default"):
         """Read credentials from ~/.aws/credentials file
 
         Args:
@@ -719,7 +719,7 @@ class MultiProviderAuth:
             self._debug_print(f"Error reading credentials from file: {e}")
             return None
 
-    def check_credentials_file_expiration(self, profile="ClaudeCode"):
+    def check_credentials_file_expiration(self, profile="claude-code-default"):
         """Check if credentials in file are expired
 
         Args:
@@ -2297,7 +2297,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="AWS credential provider for OIDC + Cognito Identity Pool")
     # Check environment variable first, then use default
-    default_profile = os.getenv("CCWB_PROFILE", "ClaudeCode")
+    default_profile = os.getenv("CCWB_PROFILE", "claude-code-default")
     parser.add_argument("--profile", "-p", default=default_profile, help="Configuration profile to use")
     parser.add_argument("--version", "-v", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
