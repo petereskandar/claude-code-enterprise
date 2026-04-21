@@ -392,8 +392,9 @@ def lambda_handler(event, context):
         # Get time range
         start_time, end_time = get_time_range(time_range, default_hours=1)
 
-        # Validate time range (max 7 days)
-        is_valid, range_days, error_html = validate_time_range(start_time, end_time)
+        # Validate time range
+        max_query_days = int(os.environ.get('MAX_QUERY_DAYS', '7'))
+        is_valid, range_days, error_html = validate_time_range(start_time, end_time, max_query_days)
         if not is_valid:
             return error_html
 
