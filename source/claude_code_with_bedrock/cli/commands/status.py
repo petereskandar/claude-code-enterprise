@@ -148,7 +148,7 @@ class StatusCommand(Command):
             # Show test commands
             console.print("\n[bold]Test Commands[/bold]")
             console.print(
-                "• Test authentication: [dim]export AWS_PROFILE=ClaudeCode && aws sts get-caller-identity[/dim]"
+                "• Test authentication: [dim]export AWS_PROFILE=claude-code-default && aws sts get-caller-identity[/dim]"
             )
             console.print("• Get monitoring token: [dim]poetry run ccwb get-monitoring-token[/dim]")
 

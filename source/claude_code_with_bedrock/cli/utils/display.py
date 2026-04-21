@@ -37,7 +37,7 @@ def _display_table_format(console: Console, profile, identity_pool_id: str | Non
 
     # Configuration and AWS profile names
     config_table.add_row("Configuration Profile", profile.name)
-    config_table.add_row("AWS Profile", "ClaudeCode")
+    config_table.add_row("AWS Profile", "claude-code-default")
 
     # Provider information
     config_table.add_row("OIDC Provider", profile.provider_domain)
@@ -99,7 +99,7 @@ def _display_simple_format(console: Console, profile, identity_pool_id: str | No
 
     # Configuration and AWS profile names
     console.print(f"  Configuration Profile: [cyan]{profile.name}[/cyan]")
-    console.print("  AWS Profile: [cyan]ClaudeCode[/cyan]")
+    console.print("  AWS Profile: [cyan]claude-code-default[/cyan]")
 
     # Provider information
     console.print(f"  OIDC Provider: [cyan]{profile.provider_domain}[/cyan]")
@@ -163,7 +163,7 @@ def get_configuration_dict(profile, identity_pool_id: str | None = None) -> dict
     """
     config_dict = {
         "configuration_profile": profile.name,
-        "aws_profile": "ClaudeCode",
+        "aws_profile": "claude-code-default",
         "oidc_provider": profile.provider_domain,
         "client_id": profile.client_id,
         "aws_region": profile.aws_region,

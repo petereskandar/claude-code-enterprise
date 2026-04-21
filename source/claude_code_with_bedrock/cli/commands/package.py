@@ -72,7 +72,7 @@ class PackageCommand(Command):
         # Load configuration first (needed to check CodeBuild status)
         config = Config.load()
         # Use specified profile or default to active profile, or fall back to "ClaudeCode"
-        profile_name = self.option("profile") or config.active_profile or "ClaudeCode"
+        profile_name = self.option("profile") or config.active_profile or "claude-code-default"
         profile = config.get_profile(profile_name)
 
         if not profile:
@@ -2098,7 +2098,7 @@ RUN mkdir -p /output && shiv \\
         profile,
         federation_identifier: str,
         federation_type: str = "cognito",
-        profile_name: str = "ClaudeCode",
+        profile_name: str = "claude-code-default",
         console=None,
     ) -> Path:
         """Create the configuration file.
@@ -2108,7 +2108,7 @@ RUN mkdir -p /output && shiv \\
             profile: Profile object with configuration
             federation_identifier: Identity pool ID or role ARN
             federation_type: "cognito" or "direct"
-            profile_name: Name to use as key in config.json (defaults to "ClaudeCode" for backward compatibility)
+            profile_name: Name to use as key in config.json (defaults to "claude-code-default")
         """
         config = {
             profile_name: {
@@ -2690,7 +2690,7 @@ pause
 
 3. Use the AWS profile:
    ```bash
-   export AWS_PROFILE=ClaudeCode
+   export AWS_PROFILE=claude-code-default
    aws sts get-caller-identity
    ```
 
@@ -2738,13 +2738,13 @@ install.bat
 The installer will:
 - Check for AWS CLI installation
 - Copy authentication tools to `%USERPROFILE%\\claude-code-with-bedrock`
-- Configure the AWS profile "ClaudeCode"
+- Configure the AWS profile "claude-code-default"
 - Test the authentication
 
 #### Step 4: Use Claude Code
 ```cmd
 # Set the AWS profile
-set AWS_PROFILE=ClaudeCode
+set AWS_PROFILE=claude-code-default
 
 # Verify authentication works
 aws sts get-caller-identity
@@ -2754,7 +2754,7 @@ aws sts get-caller-identity
 
 For PowerShell users:
 ```powershell
-$env:AWS_PROFILE = "ClaudeCode"
+$env:AWS_PROFILE = "claude-code-default"
 aws sts get-caller-identity
 ```
 
@@ -2837,7 +2837,7 @@ Available metrics include:
             f.write(readme_content)
 
     def _create_claude_settings(
-        self, output_dir: Path, profile, include_coauthored_by: bool = True, profile_name: str = "ClaudeCode"
+        self, output_dir: Path, profile, include_coauthored_by: bool = True, profile_name: str = "claude-code-default"
     ):
         """Create Claude Code settings.json with Bedrock and optional monitoring configuration."""
         console = Console()

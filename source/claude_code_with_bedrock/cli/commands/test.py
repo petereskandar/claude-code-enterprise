@@ -174,7 +174,7 @@ class TestCommand(Command):
         with open(config_path) as f:
             pkg_config = json.load(f)
             # Try to read from the specified profile name, fall back to "ClaudeCode" for backward compatibility
-            profile_config = pkg_config.get(test_profile_name) or pkg_config.get("ClaudeCode", {})
+            profile_config = pkg_config.get(test_profile_name) or pkg_config.get("claude-code-default", {})
 
             if not profile_config:
                 console.print(f"[red]✗ Profile '{test_profile_name}' not found in config.json[/red]")
