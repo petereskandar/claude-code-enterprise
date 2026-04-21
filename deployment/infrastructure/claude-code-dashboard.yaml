@@ -30,6 +30,43 @@ Conditions:
   UseInferenceProfiles: !Equals [!Ref InferenceProfilesEnabled, 'true']
 
 Resources:
+  # SSM Parameter for model pricing (used by TotalCostWidget)
+  ModelPricingParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/claude-code/${DashboardName}/model-pricing'
+      Type: String
+      Description: Per-model token pricing for cost estimation
+      Value: !Sub |
+        {
+          "models": {
+            "anthropic.claude-opus-4-6-v1": {
+              "input_per_million": 15.00,
+              "output_per_million": 75.00,
+              "cache_read_per_million": 1.50,
+              "cache_write_per_million": 18.75
+            },
+            "anthropic.claude-sonnet-4-6-v1": {
+              "input_per_million": 3.00,
+              "output_per_million": 15.00,
+              "cache_read_per_million": 0.30,
+              "cache_write_per_million": 3.75
+            },
+            "anthropic.claude-haiku-4-5-20251001-v1:0": {
+              "input_per_million": 0.80,
+              "output_per_million": 4.00,
+              "cache_read_per_million": 0.08,
+              "cache_write_per_million": 1.00
+            }
+          },
+          "default": {
+            "input_per_million": 3.00,
+            "output_per_million": 15.00,
+            "cache_read_per_million": 0.30,
+            "cache_write_per_million": 3.75
+          }
+        }
+
   # DynamoDB Table for Metrics Storage
   MetricsTable:
     Type: AWS::DynamoDB::Table
@@ -170,6 +207,24 @@ Resources:
                 Resource:
                   - !GetAtt MetricsTable.Arn
                   - !Sub '${MetricsTable.Arn}/index/*'
+        - PolicyName: SSMPricingReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/claude-code/${DashboardName}/model-pricing'
+        - PolicyName: BedrockInferenceProfileRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:GetInferenceProfile
+                  - bedrock:ListInferenceProfiles
+                Resource: '*'
 
   MetricsAggregatorRole:
     Type: AWS::IAM::Role
@@ -349,6 +404,24 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt BedrockMetricsBridgeScheduleRule.Arn
 
+  TotalCostWidget:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ClaudeCode-Widget-TotalCost
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomWidgetRole.Arn
+      Timeout: 60
+      Layers:
+        - !Ref QueryUtilsLayer
+        - !Ref MetricsUtilsLayer
+      Environment:
+        Variables:
+          METRICS_REGION: !Ref MetricsRegion
+          PRICING_PARAM_NAME: !Sub '/claude-code/${DashboardName}/model-pricing'
+          MAX_QUERY_DAYS: '31'
+      Code: ./lambda-functions/total_cost/
+
   TotalTokensWidget:
     Type: AWS::Lambda::Function
     Properties:
@@ -365,6 +438,7 @@ Resources:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
           METRICS_ONLY: 'true'
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/total_tokens/
 
   OperationsCountWidget:
@@ -382,6 +456,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/operations_count/
 
   ActiveUsersWidget:
@@ -401,6 +476,7 @@ Resources:
           METRICS_REGION: !Ref MetricsRegion
           METRICS_ONLY: 'true'
           METRICS_TABLE: !Ref MetricsTable
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/active_users/
 
   TokenByModelWidget:
@@ -418,6 +494,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/token_by_model/
 
   CacheEfficiencyWidget:
@@ -436,6 +513,7 @@ Resources:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
           METRICS_ONLY: 'true'
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/cache_efficiency/
 
   TopUsersWidget:
@@ -455,6 +533,7 @@ Resources:
           METRICS_REGION: !Ref MetricsRegion
           METRICS_ONLY: 'true'
           METRICS_TABLE: !Ref MetricsTable
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/top_users/
 
   OperationsByTypeWidget:
@@ -472,6 +551,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/operations_by_type/
 
   TokenUsageByTypeWidget:
@@ -489,6 +569,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/token_usage_by_type/
 
   CodeGenerationByLanguageWidget:
@@ -506,6 +587,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/code_generation_by_language/
 
   LinesOfCodeWidget:
@@ -523,6 +605,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/lines_of_code/
 
   CommitsWidget:
@@ -540,6 +623,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/commits/
 
   CodeAcceptanceWidget:
@@ -557,6 +641,7 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/code_acceptance/
 
   ActiveHoursWidget:
@@ -574,7 +659,42 @@ Resources:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
           METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/active_hours/
+
+  TokenUsageTimeWidget:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ClaudeCode-Widget-TokenUsageTime
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomWidgetRole.Arn
+      Timeout: 60
+      Layers:
+        - !Ref QueryUtilsLayer
+      Environment:
+        Variables:
+          METRICS_LOG_GROUP: !Ref MetricsLogGroup
+          METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
+      Code: ./lambda-functions/token_usage_time/
+
+  TokenByModelTimeWidget:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ClaudeCode-Widget-TokenByModelTime
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt CustomWidgetRole.Arn
+      Timeout: 60
+      Layers:
+        - !Ref QueryUtilsLayer
+      Environment:
+        Variables:
+          METRICS_LOG_GROUP: !Ref MetricsLogGroup
+          METRICS_REGION: !Ref MetricsRegion
+          MAX_QUERY_DAYS: '31'
+      Code: ./lambda-functions/token_by_model_time/
 
   # ModelQuotaUsageWidget:
   #   Type: AWS::Lambda::Function
@@ -607,7 +727,7 @@ Resources:
               "type": "custom",
               "x": 0,
               "y": 2,
-              "width": 6,
+              "width": 5,
               "height": 4,
               "properties": {
                 "endpoint": "${TotalTokensWidget.Arn}",
@@ -621,9 +741,25 @@ Resources:
             },
             {
               "type": "custom",
-              "x": 6,
+              "x": 5,
               "y": 2,
-              "width": 6,
+              "width": 5,
+              "height": 4,
+              "properties": {
+                "endpoint": "${TotalCostWidget.Arn}",
+                "updateOn": {
+                  "refresh": true,
+                  "resize": true,
+                  "timeRange": true
+                },
+                "title": "Total Cost (USD)"
+              }
+            },
+            {
+              "type": "custom",
+              "x": 10,
+              "y": 2,
+              "width": 5,
               "height": 4,
               "properties": {
                 "endpoint": "${ActiveUsersWidget.Arn}",
@@ -637,9 +773,9 @@ Resources:
             },
             {
               "type": "custom",
-              "x": 12,
+              "x": 15,
               "y": 2,
-              "width": 6,
+              "width": 5,
               "height": 4,
               "properties": {
                 "endpoint": "${OperationsCountWidget.Arn}",
@@ -653,9 +789,9 @@ Resources:
             },
             {
               "type": "custom",
-              "x": 18,
+              "x": 20,
               "y": 2,
-              "width": 6,
+              "width": 4,
               "height": 4,
               "properties": {
                 "endpoint": "${CacheEfficiencyWidget.Arn}",
@@ -717,32 +853,35 @@ Resources:
               }
             },
             {
-              "type": "log",
+              "type": "custom",
               "x": 0,
               "y": 12,
               "width": 12,
               "height": 6,
               "properties": {
-                "query": "SOURCE '/aws/claude-code/metrics' | fields @timestamp, @message | filter @message like /claude_code.token.usage/ | parse @message /\"claude_code.token.usage\":(?<tokens>[0-9.]+)/ | stats sum(tokens) as total_tokens by bin(5m)",
-                "region": "${MetricsRegion}",
-                "title": "Token Usage Over Time",
-                "queryLanguage": "cwli",
-                "view": "timeSeries"
+                "endpoint": "${TokenUsageTimeWidget.Arn}",
+                "updateOn": {
+                  "refresh": true,
+                  "resize": true,
+                  "timeRange": true
+                },
+                "title": "Token Usage Over Time"
               }
             },
             {
-              "type": "log",
+              "type": "custom",
               "x": 12,
               "y": 12,
               "width": 12,
               "height": 6,
               "properties": {
-                "query": "SOURCE '/aws/claude-code/metrics' | filter @message like /claude_code.token.usage/ | parse @message /\"model\":\"(?<model>[^\"]*)\"/  | parse @message /\"claude_code.token.usage\":(?<tokens>[0-9.]+)/ | fields bin(5m) as time, if(model like /opus-4-6/, tokens, 0) as opus_4_6, if(model like /opus-4-1/, tokens, 0) as opus_4_1, if(model like /opus-4-20250514|opus-4-0/, tokens, 0) as opus_4, if(model like /sonnet-4-5/, tokens, 0) as sonnet_4_5, if(model like /sonnet-4-[^5]|sonnet-4-20250514/, tokens, 0) as sonnet_4, if(model like /3[-.]7.*sonnet/, tokens, 0) as sonnet_3_7, if(model like /3[-.]5.*haiku/, tokens, 0) as haiku_3_5 | stats sum(opus_4_6) as Opus_4_6, sum(opus_4_1) as Opus_4_1, sum(opus_4) as Opus_4, sum(sonnet_4_5) as Sonnet_4_5, sum(sonnet_4) as Sonnet_4, sum(sonnet_3_7) as Sonnet_3_7, sum(haiku_3_5) as Haiku_3_5 by time",
-                "region": "${MetricsRegion}",
-                "title": "Token Usage by Model Over Time",
-                "queryLanguage": "cwli",
-                "view": "timeSeries",
-                "stacked": false
+                "endpoint": "${TokenByModelTimeWidget.Arn}",
+                "updateOn": {
+                  "refresh": true,
+                  "resize": true,
+                  "timeRange": true
+                },
+                "title": "Token Usage by Model Over Time"
               }
             },
             {
