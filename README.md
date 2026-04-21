@@ -22,6 +22,20 @@ This guidance provides enterprise deployment patterns for Claude Code with Amazo
 - **Multi-Profile Support**: Manage multiple authentication profiles
 - **Cross-Platform**: Works on Windows, macOS, and Linux
 
+## Enterprise Add-Ons
+
+This fork extends the official guidance with additional components for enterprise-scale deployments:
+
+| Add-On | Description | Stack |
+|---|---|---|
+| **CloudWatch Dashboard** | Real-time visibility on token usage, costs, active users, cache efficiency, and per-model breakdown — all via embedded custom widget Lambdas | `claude-code-dashboard` |
+| **Quota Enforcement** | Per-user monthly/daily token limits with fine-grained policies (user, group, default). API Gateway + JWT authorizer for real-time quota checks, SNS alerts at 80%/90% thresholds, server-side blocking via inference profile tagging | `claude-code-quota` |
+| **Metrics Aggregation** | EventBridge-scheduled Lambda that aggregates OTel logs into CloudWatch custom metrics (namespace `ClaudeCode`) at 5-minute intervals | `claude-code-metrics-aggregation` |
+| **Logs Insights Queries** | 19 pre-built CloudWatch Logs Insights queries: real-time TPM/RPM, cost analysis by user/model, cache hit rates, peak usage windows, session deep dives | `claude-code-logs-insights` |
+| **CodeBuild (Windows + Linux)** | Nuitka-based build pipeline producing standalone executables — no Python required on end-user machines | `claude-code-codebuild` |
+
+![CloudWatch Dashboard](assets/images/ClaudeCodeDashboard.png)
+
 ## Table of Contents
 
 1. [Quick Start](#quick-start)
