@@ -258,6 +258,10 @@ Resources:
           QUOTA_TABLE: !Ref UserQuotaMetricsTableName
       Code: ./lambda-functions/admin_console/
       Tags:
+        - Key: Application
+          Value: ClaudeCodeWithBedrock
+
+  # ALB Security Group
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
