@@ -366,7 +366,7 @@ Resources:
                 - !Sub 'https://login.microsoftonline.com/${AzureTenantId}/v2.0'
                 - !If
                   - IsAuth0
-                  - !Sub 'https://${Auth0Domain}'
+                  - !Sub 'https://${Auth0Domain}/'
                   - !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPoolId}'
             AuthorizationEndpoint: !If
               - IsOkta
