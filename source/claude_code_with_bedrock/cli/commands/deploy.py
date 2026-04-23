@@ -1073,26 +1073,68 @@ class DeployCommand(Command):
                 deployment_timestamp = datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
                 params.append(f"DeploymentTimestamp={deployment_timestamp}")
 
-                result = deploy_with_cf(
-                    template,
-                    stack_name,
-                    params,
-                    ["CAPABILITY_NAMED_IAM"],
-                    task_description="Deploying admin console stack...",
-                )
+                # Package the template (Lambda code is external, needs S3 upload)
+                s3_stack = profile.stack_names.get("s3", f"{profile.identity_pool_name}-s3bucket")
+                s3_outputs = get_stack_outputs(s3_stack, profile.aws_region)
 
-                if result == 0:
-                    outputs = get_stack_outputs(stack_name, profile.aws_region)
-                    console.print("\n[bold green]✓ Admin console deployed successfully![/bold green]")
-                    console.print(f"\n[bold]Admin Console URL:[/bold] {outputs.get('AdminConsoleURL', 'N/A')}")
-                    console.print("\n[bold yellow]⚠️  Configure your IdP web application:[/bold yellow]")
-                    console.print(f"   [cyan]Redirect URI:[/cyan] {outputs.get('IdPRedirectURI', 'N/A')}")
-                    console.print(
-                        "\n   Add this redirect URI to your IdP web application settings "
-                        "before admins can authenticate."
+                if not s3_outputs or not s3_outputs.get("CfnArtifactsBucket"):
+                    console.print(f"[red]Could not get S3 bucket from s3bucket stack {s3_stack}[/red]")
+                    console.print("[yellow]The s3bucket stack must be deployed first.[/yellow]")
+                    console.print("Run: [cyan]ccwb deploy s3bucket[/cyan]")
+                    return 1
+
+                s3_bucket = s3_outputs["CfnArtifactsBucket"]
+
+                task = progress.add_task("Packaging admin console Lambda function...", total=None)
+
+                try:
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                        packaged_template_path = f.name
+
+                    cmd = [
+                        "aws", "cloudformation", "package",
+                        "--template-file", str(template),
+                        "--s3-bucket", s3_bucket,
+                        "--s3-prefix", "claude-code/admin-console",
+                        "--output-template-file", packaged_template_path,
+                        "--region", profile.aws_region,
+                    ]
+
+                    result_pkg = subprocess.run(cmd, capture_output=True, text=True)
+
+                    if result_pkg.returncode != 0:
+                        console.print(f"[red]Failed to package template: {result_pkg.stderr}[/red]")
+                        return 1
+
+                    progress.update(task, description="Admin console Lambda packaged successfully", completed=True)
+
+                    result = deploy_with_cf(
+                        packaged_template_path,
+                        stack_name,
+                        params,
+                        ["CAPABILITY_NAMED_IAM"],
+                        task_description="Deploying admin console stack...",
                     )
 
-                return result
+                    if result == 0:
+                        outputs = get_stack_outputs(stack_name, profile.aws_region)
+                        console.print("\n[bold green]✓ Admin console deployed successfully![/bold green]")
+                        console.print(f"\n[bold]Admin Console URL:[/bold] {outputs.get('AdminConsoleURL', 'N/A')}")
+                        console.print("\n[bold yellow]⚠️  Configure your IdP web application:[/bold yellow]")
+                        console.print(f"   [cyan]Redirect URI:[/cyan] {outputs.get('IdPRedirectURI', 'N/A')}")
+                        console.print(
+                            "\n   Add this redirect URI to your IdP web application settings "
+                            "before admins can authenticate."
+                        )
+
+                    return result
+
+                finally:
+                    if "packaged_template_path" in locals():
+                        try:
+                            os.unlink(packaged_template_path)
+                        except Exception:
+                            pass
 
             elif stack_type == "codebuild":
                 template = project_root / "deployment" / "infrastructure" / "codebuild-windows.yaml"
