@@ -29,6 +29,9 @@ def lambda_handler(event, context):
         start_dt = datetime.fromtimestamp(start_time / 1000)
         end_dt = datetime.fromtimestamp(end_time / 1000)
 
+        range_seconds = (end_time - start_time) / 1000
+        period = max(300, ((int(range_seconds / 1440) + 59) // 60) * 60)
+
         # Query claude_code.token.usage metric by type dimension
         # These are published as EMF by the BedrockMetricsBridge Lambda
         token_type_map = [
@@ -47,7 +50,7 @@ def lambda_handler(event, context):
                 Dimensions=[{'Name': 'type', 'Value': type_value}],
                 StartTime=start_dt,
                 EndTime=end_dt,
-                Period=300,
+                Period=period,
                 Statistics=['Sum'],
             )
 
