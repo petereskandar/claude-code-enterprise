@@ -637,7 +637,7 @@ Resources:
             return tags
           def handler(event, context):
             if not INFERENCE_PROFILE_MODELS:
-              logger.error("No models configured — check INFERENCE_PROFILE_MODELS_JSON env var")
+              logger.error("No models configured ??? check INFERENCE_PROFILE_MODELS_JSON env var")
               return {"statusCode":500,"body":json.dumps({"error":"No models configured"})}
             region = boto3.session.Session().region_name
             bedrock = boto3.client("bedrock", region_name=region)
