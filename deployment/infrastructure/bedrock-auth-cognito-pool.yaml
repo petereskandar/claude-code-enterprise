@@ -166,7 +166,7 @@ Resources:
           # Statement 2: allow invoke on underlying foundation/system models, but ONLY when the
           # call originates from an application inference profile in this account (cross-region routing).
           # Resources enumerate every foundation-model ARN reachable by the EU and US cross-region
-          # inference profiles for the three enabled models (opus-4-6, sonnet-4-6, haiku-4-5).
+          # inference profiles for the three enabled models (opus-4-7, sonnet-4-6, haiku-4-5).
           - !If
             - UseInferenceProfiles
             - Sid: AllowBedrockInvokeFoundationModelViaInferenceProfile
@@ -180,40 +180,40 @@ Resources:
                 - 'bedrock-runtime:Converse'
               Resource:
                 # EU cross-region inference profile system ARNs
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-haiku-4-5-20251001-v1:0'
                 # US cross-region inference profile system ARNs
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0'
                 # EU foundation-model ARNs (destination regions for eu.* profiles)
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
                 # US foundation-model ARNs (destination regions for us.* profiles)
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
               Condition:
@@ -496,6 +496,24 @@ Resources:
         - Key: Purpose
           Value: Claude Code Inference Profile Provisioner
 
+  InferenceProfileModelsParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseInferenceProfiles
+    Properties:
+      Name: '/claude-code/inference-profile-models'
+      Type: String
+      Description: >-
+        JSON configuration for Bedrock inference profile models.
+        Update this parameter to add/remove/change models without redeploying the Lambda.
+      Value: !Sub |
+        {
+          "opus-4-7":   {"cross_region_profile_id": "{geo}.anthropic.claude-opus-4-7",             "enabled": true},
+          "sonnet-4-6": {"cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",           "enabled": true},
+          "haiku-4-5":  {"cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0", "enabled": true}
+        }
+      Tags:
+        Purpose: Claude Code Inference Profile Models
+
   InferenceProfileProvisionerLogGroup:
     Type: AWS::Logs::LogGroup
     Condition: UseInferenceProfiles
@@ -510,9 +528,8 @@ Resources:
     Properties:
       FunctionName: 'ClaudeCode-InferenceProfileProvisioner'
       Description: >-
-        Provisions Bedrock Application Inference Profiles for authenticated users.
-        Sole principal with bedrock:CreateInferenceProfile — users invoke this instead
-        of calling the Bedrock management plane directly.
+        Provisions per-user Bedrock Application Inference Profiles.
+        Model config from SSM /claude-code/inference-profile-models.
       Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt InferenceProfileProvisionerRole.Arn
@@ -520,18 +537,25 @@ Resources:
       MemorySize: 128
       LoggingConfig:
         LogGroup: '/aws/lambda/ClaudeCode-InferenceProfileProvisioner'
+      Environment:
+        Variables:
+          INFERENCE_PROFILE_MODELS_JSON: !GetAtt InferenceProfileModelsParameter.Value
       Code:
         ZipFile: |
-          import json, logging, re, hashlib, boto3
+          import json, logging, os, re, hashlib, boto3
           from botocore.exceptions import ClientError
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
           _EU_REGIONS = {"eu-west-1","eu-west-2","eu-west-3","eu-central-1","eu-central-2","eu-north-1","eu-south-1","eu-south-2"}
-          INFERENCE_PROFILE_MODELS = {
-            "opus-4-6":  {"cross_region_profile_id": "{geo}.anthropic.claude-opus-4-6-v1",            "enabled": True},
-            "sonnet-4-6":{"cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",             "enabled": True},
-            "haiku-4-5": {"cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0","enabled": True},
-          }
+          def _load_models():
+            raw = os.environ.get("INFERENCE_PROFILE_MODELS_JSON", "{}")
+            try:
+              return json.loads(raw)
+            except json.JSONDecodeError as e:
+              logger.error("Failed to parse INFERENCE_PROFILE_MODELS_JSON: %s", e)
+              return {}
+          INFERENCE_PROFILE_MODELS = _load_models()
+          logger.info("Loaded %d model(s) from config: %s", len(INFERENCE_PROFILE_MODELS), list(INFERENCE_PROFILE_MODELS.keys()))
           _MAX_TAG_VALUE = 256
           _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
           def _geo(region): return "eu" if region in _EU_REGIONS else "us"
@@ -551,6 +575,9 @@ Resources:
               if v: tags.append({"key":tk,"value":str(v)[:_MAX_TAG_VALUE]})
             return tags
           def handler(event, context):
+            if not INFERENCE_PROFILE_MODELS:
+              logger.error("No models configured — check INFERENCE_PROFILE_MODELS_JSON env var")
+              return {"statusCode":500,"body":json.dumps({"error":"No models configured"})}
             region = boto3.session.Session().region_name
             bedrock = boto3.client("bedrock", region_name=region)
             email = (event.get("email") or "").strip()
