@@ -1,10 +1,9 @@
 # ABOUTME: Lambda function that bridges Bedrock inference profile metrics to OTEL log format
 # ABOUTME: Reads InputTokenCount/OutputTokenCount/CacheRead/CacheWrite from AWS/Bedrock
-# ABOUTME: CloudWatch namespace per InferenceProfileArn, maps ARN to user email via tags,
+# ABOUTME: CloudWatch namespace per InferenceProfileArn, maps ARN to user email via
+# ABOUTME: DynamoDB InferenceProfileMapping table (populated by the provisioner Lambda),
 # ABOUTME: then writes structured JSON log records to /aws/claude-code/metrics in exactly
 # ABOUTME: the same format the ADOT awsemf exporter would produce.
-# ABOUTME: This lets the metrics aggregator, widget Lambdas, and quota checks all work
-# ABOUTME: unchanged when inference profiles are used instead of the OTEL collector.
 
 import json
 import boto3
@@ -13,13 +12,14 @@ from datetime import datetime, timedelta, timezone
 
 # Clients
 cloudwatch_client = boto3.client("cloudwatch")
-bedrock_client = boto3.client("bedrock")
 logs_client = boto3.client("logs")
+dynamodb_resource = boto3.resource("dynamodb")
 boto3_session = boto3.session.Session()
 
 # Configuration
 LOG_GROUP = os.environ.get("METRICS_LOG_GROUP", "/aws/claude-code/metrics")
 LOG_STREAM = "bedrock-metrics-bridge"
+MAPPING_TABLE_NAME = os.environ.get("INFERENCE_PROFILE_MAPPING_TABLE", "InferenceProfileMapping")
 AGGREGATION_WINDOW = 5    # minutes — must match the EventBridge schedule rate
 METRIC_PERIOD = 300       # seconds — granularity of AWS/Bedrock datapoints (5 min)
 # Query slightly more than one period back to absorb CloudWatch ingestion delay
@@ -67,86 +67,31 @@ def lambda_handler(event, context):
 
 def _build_arn_to_profile_map() -> dict:
     """
-    Return { inferenceProfileArn: { "email": str, "model": str } } for all
-    APPLICATION profiles tagged with 'user.email'.
-    Model name is extracted from the underlying model source ARN
-    (e.g. arn:...:foundation-model/anthropic.claude-sonnet-4-5-... → claude-sonnet-4-5).
+    Return { inferenceProfileArn: { "email": str, "model": str } } by scanning
+    the InferenceProfileMapping DynamoDB table (populated by the provisioner Lambda).
     """
     result = {}
     try:
-        paginator = bedrock_client.get_paginator("list_inference_profiles")
-        for page in paginator.paginate(typeEquals="APPLICATION"):
-            for summary in page.get("inferenceProfileSummaries", []):
-                arn = summary.get("inferenceProfileArn")
-                if not arn:
-                    continue
+        table = dynamodb_resource.Table(MAPPING_TABLE_NAME)
+        response = table.scan()
+        items = response.get("Items", [])
 
-                email = None
-                model = "unknown"
+        while "LastEvaluatedKey" in response:
+            response = table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            items.extend(response.get("Items", []))
 
-                # Get email tag
-                try:
-                    tags = bedrock_client.list_tags_for_resource(resourceARN=arn).get("tags", [])
-                    for tag in tags:
-                        if tag.get("key") == "user.email":
-                            email = tag["value"]
-                            break
-                except Exception as e:
-                    print(f"Warning: could not get tags for {arn}: {e}")
-
-                if not email:
-                    continue  # skip profiles without email tag
-
-                # Get model name from modelSources via get_inference_profile
-                try:
-                    detail = bedrock_client.get_inference_profile(inferenceProfileIdentifier=arn)
-                    print(f"  get_inference_profile response keys: {list(detail.keys())}")
-                    sources = detail.get("models", [])
-                    print(f"  models ({len(sources)}): {sources}")
-                    if sources:
-                        model_arn = sources[0].get("modelArn", "")
-                        print(f"  modelArn: {model_arn}")
-                        model = _model_name_from_model_arn(model_arn)
-                        print(f"  resolved model: {model}")
-                except Exception as e:
-                    print(f"Warning: could not get model source for {arn}: {e}")
-
+        for item in items:
+            arn = item.get("profileArn")
+            email = item.get("email")
+            model = item.get("model", "unknown")
+            if arn and email:
                 result[arn] = {"email": email, "model": model}
-                print(f"  Profile {arn.split('/')[-1]}: email={email}, model={model}")
+
+        print(f"Loaded {len(result)} profile(s) from DynamoDB mapping table")
 
     except Exception as e:
-        print(f"Error listing inference profiles: {e}")
+        print(f"Error scanning InferenceProfileMapping table: {e}")
     return result
-
-
-def _model_name_from_model_arn(model_arn: str) -> str:
-    """
-    Extract a friendly model name from a foundation model ARN.
-    e.g. arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0
-    → claude-sonnet-4-5
-    """
-    import re
-    try:
-        print(f"  parsing model_arn: '{model_arn}'")
-        # Get the part after the last '/'
-        model_id = model_arn.split("/")[-1]  # e.g. anthropic.claude-sonnet-4-5-20250929-v1:0
-        print(f"  after split('/'): '{model_id}'")
-        # Strip provider prefix (e.g. anthropic.)
-        model_id = model_id.split(".")[-1] if "." in model_id else model_id
-        print(f"  after strip prefix: '{model_id}'")
-        # Strip version suffix (e.g. -v1:0 or -v2:0)
-        for suffix_pattern in ["-v1:0", "-v2:0", "-v1", "-v2"]:
-            if suffix_pattern in model_id:
-                model_id = model_id[:model_id.rfind(suffix_pattern)]
-                break
-        print(f"  after strip version: '{model_id}'")
-        # Strip date stamp (8-digit sequence like -20250929)
-        model_id = re.sub(r"-\d{8}$", "", model_id)
-        print(f"  final model_id: '{model_id}'")
-        return model_id
-    except Exception as e:
-        print(f"  _model_name_from_model_arn error: {e}")
-        return "unknown"
 
 
 def _get_bedrock_metrics(profile_arns: list, start_time: datetime, end_time: datetime) -> dict:
