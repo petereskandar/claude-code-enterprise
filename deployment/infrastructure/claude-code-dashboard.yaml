@@ -40,11 +40,11 @@ Resources:
       Value: !Sub |
         {
           "models": {
-            "anthropic.claude-opus-4-6-v1": {
-              "input_per_million": 15.00,
-              "output_per_million": 75.00,
-              "cache_read_per_million": 1.50,
-              "cache_write_per_million": 18.75
+            "anthropic.claude-opus-4-7": {
+              "input_per_million": 5.50,
+              "output_per_million": 27.50,
+              "cache_read_per_million": 0.55,
+              "cache_write_per_million": 6.875
             },
             "anthropic.claude-sonnet-4-6-v1": {
               "input_per_million": 3.00,
@@ -128,6 +128,25 @@ Resources:
           Value: ClaudeCodeMetrics
         - Key: Purpose
           Value: Dashboard metrics storage
+
+  # DynamoDB Table for Inference Profile ARN → user mapping (inventory)
+  InferenceProfileMappingTable:
+    Type: AWS::DynamoDB::Table
+    Condition: UseInferenceProfiles
+    Properties:
+      TableName: InferenceProfileMapping
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: profileArn
+          AttributeType: S
+      KeySchema:
+        - AttributeName: profileArn
+          KeyType: HASH
+      Tags:
+        - Key: Name
+          Value: InferenceProfileMapping
+        - Key: Purpose
+          Value: Maps inference profile ARNs to user email and model
 
   QueryUtilsLayer:
     Type: AWS::Lambda::LayerVersion
@@ -330,20 +349,24 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: BedrockMetricsRead
+        - PolicyName: CloudWatchMetricsRead
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
-                  - bedrock:ListInferenceProfiles
-                  - bedrock:GetInferenceProfile
-                  - bedrock:ListTagsForResource
-                Resource: '*'
-              - Effect: Allow
-                Action:
                   - cloudwatch:GetMetricData
                 Resource: '*'
+        - PolicyName: InferenceProfileMappingRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt InferenceProfileMappingTable.Arn
         - PolicyName: MetricsLogGroupWrite
           PolicyDocument:
             Version: '2012-10-17'
@@ -379,6 +402,7 @@ Resources:
       Environment:
         Variables:
           METRICS_LOG_GROUP: !Ref MetricsLogGroup
+          INFERENCE_PROFILE_MAPPING_TABLE: !Ref InferenceProfileMappingTable
       Code: ./lambda-functions/bedrock_metrics_bridge/
 
   BedrockMetricsBridgeScheduleRule:
@@ -662,40 +686,6 @@ Resources:
           MAX_QUERY_DAYS: '31'
       Code: ./lambda-functions/active_hours/
 
-  TokenUsageTimeWidget:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: ClaudeCode-Widget-TokenUsageTime
-      Runtime: python3.12
-      Handler: index.lambda_handler
-      Role: !GetAtt CustomWidgetRole.Arn
-      Timeout: 60
-      Layers:
-        - !Ref QueryUtilsLayer
-      Environment:
-        Variables:
-          METRICS_LOG_GROUP: !Ref MetricsLogGroup
-          METRICS_REGION: !Ref MetricsRegion
-          MAX_QUERY_DAYS: '31'
-      Code: ./lambda-functions/token_usage_time/
-
-  TokenByModelTimeWidget:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: ClaudeCode-Widget-TokenByModelTime
-      Runtime: python3.12
-      Handler: index.lambda_handler
-      Role: !GetAtt CustomWidgetRole.Arn
-      Timeout: 60
-      Layers:
-        - !Ref QueryUtilsLayer
-      Environment:
-        Variables:
-          METRICS_LOG_GROUP: !Ref MetricsLogGroup
-          METRICS_REGION: !Ref MetricsRegion
-          MAX_QUERY_DAYS: '31'
-      Code: ./lambda-functions/token_by_model_time/
-
   # ModelQuotaUsageWidget:
   #   Type: AWS::Lambda::Function
   #   Properties:
@@ -853,35 +843,41 @@ Resources:
               }
             },
             {
-              "type": "custom",
+              "type": "log",
               "x": 0,
               "y": 12,
               "width": 12,
               "height": 6,
               "properties": {
-                "endpoint": "${TokenUsageTimeWidget.Arn}",
-                "updateOn": {
-                  "refresh": true,
-                  "resize": true,
-                  "timeRange": true
-                },
-                "title": "Token Usage Over Time"
+                "query": "SOURCE '${MetricsLogGroup}' | fields @timestamp, @message | filter @message like /claude_code.token.usage/ | parse @message /\"claude_code.token.usage\":(?<tokens>[0-9.]+)/ | stats sum(tokens) as total_tokens by bin(5m)",
+                "region": "${MetricsRegion}",
+                "title": "Token Usage Over Time",
+                "view": "timeSeries",
+                "stacked": false,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
               }
             },
             {
-              "type": "custom",
+              "type": "log",
               "x": 12,
               "y": 12,
               "width": 12,
               "height": 6,
               "properties": {
-                "endpoint": "${TokenByModelTimeWidget.Arn}",
-                "updateOn": {
-                  "refresh": true,
-                  "resize": true,
-                  "timeRange": true
-                },
-                "title": "Token Usage by Model Over Time"
+                "query": "SOURCE '${MetricsLogGroup}' | filter @message like /claude_code.token.usage/ | parse @message /\"model\":\"(?<model>[^\"]*)\"/ | parse @message /\"claude_code.token.usage\":(?<tokens>[0-9.]+)/ | fields bin(5m) as time, if(model like /opus-4-7/, tokens, 0) as opus_4_7, if(model like /sonnet-4-6/, tokens, 0) as sonnet_4_6, if(model like /haiku-4-5/, tokens, 0) as haiku_4_5 | stats sum(opus_4_7) as Opus_4_7, sum(sonnet_4_6) as Sonnet_4_6, sum(haiku_4_5) as Haiku_4_5 by time",
+                "region": "${MetricsRegion}",
+                "title": "Token Usage by Model Over Time",
+                "view": "timeSeries",
+                "stacked": false,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
               }
             },
             {
@@ -1078,12 +1074,12 @@ Resources:
               "height": 4,
               "properties": {
                 "metrics": [
-                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "global.anthropic.claude-opus-4-6-v1", { "stat": "Sum", "label": "Opus 4.6 (us-east-1)", "region": "us-east-1" } ],
-                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "global.anthropic.claude-opus-4-6-v1", { "stat": "Sum", "label": "Opus 4.6 (us-west-2)", "region": "us-west-2" } ],
-                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "us.anthropic.claude-opus-4-6-v1", { "stat": "Sum", "label": "Opus 4.6 US (us-east-1)", "region": "us-east-1" } ],
-                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "eu.anthropic.claude-opus-4-6-v1", { "stat": "Sum", "label": "Opus 4.6 EU (eu-central-1)", "region": "eu-central-1" } ],
-                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "eu.anthropic.claude-opus-4-6-v1", { "stat": "Sum", "label": "Opus 4.6 EU (eu-west-1)", "region": "eu-west-1" } ],
-                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "au.anthropic.claude-opus-4-6-v1", { "stat": "Sum", "label": "Opus 4.6 AU (ap-southeast-2)", "region": "ap-southeast-2" } ],
+                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "global.anthropic.claude-opus-4-7", { "stat": "Sum", "label": "Opus 4.7 (us-east-1)", "region": "us-east-1" } ],
+                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "global.anthropic.claude-opus-4-7", { "stat": "Sum", "label": "Opus 4.7 (us-west-2)", "region": "us-west-2" } ],
+                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "us.anthropic.claude-opus-4-7", { "stat": "Sum", "label": "Opus 4.7 US (us-east-1)", "region": "us-east-1" } ],
+                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "eu.anthropic.claude-opus-4-7", { "stat": "Sum", "label": "Opus 4.7 EU (eu-central-1)", "region": "eu-central-1" } ],
+                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "eu.anthropic.claude-opus-4-7", { "stat": "Sum", "label": "Opus 4.7 EU (eu-west-1)", "region": "eu-west-1" } ],
+                  [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "au.anthropic.claude-opus-4-7", { "stat": "Sum", "label": "Opus 4.7 AU (ap-southeast-2)", "region": "ap-southeast-2" } ],
                   [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "us.anthropic.claude-opus-4-1-20250805-v1:0", { "stat": "Sum", "label": "Opus 4.1 (us-east-1)", "region": "us-east-1" } ],
                   [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "us.anthropic.claude-opus-4-1-20250805-v1:0", { "stat": "Sum", "label": "Opus 4.1 (us-west-2)", "region": "us-west-2" } ],
                   [ "AWS/Bedrock", "InvocationThrottles", "ModelId", "us.anthropic.claude-opus-4-20250514-v1:0", { "stat": "Sum", "label": "Opus 4 (us-east-1)", "region": "us-east-1" } ],
@@ -1134,3 +1130,17 @@ Outputs:
     Value: !Ref MetricsAggregatorRole
     Export:
       Name: !Sub '${AWS::StackName}-MetricsAggregatorRoleName'
+
+  InferenceProfileMappingTableName:
+    Description: Name of the InferenceProfileMapping DynamoDB table
+    Condition: UseInferenceProfiles
+    Value: !Ref InferenceProfileMappingTable
+    Export:
+      Name: !Sub '${AWS::StackName}-InferenceProfileMappingTableName'
+
+  InferenceProfileMappingTableArn:
+    Description: ARN of the InferenceProfileMapping DynamoDB table
+    Condition: UseInferenceProfiles
+    Value: !GetAtt InferenceProfileMappingTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InferenceProfileMappingTableArn'
