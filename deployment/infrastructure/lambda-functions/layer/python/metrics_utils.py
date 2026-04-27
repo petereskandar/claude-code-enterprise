@@ -35,12 +35,18 @@ def get_metric_statistics(
         List of datapoints with Timestamp and value
     """
     try:
+        range_seconds = (end_time - start_time) / 1000
+        max_datapoints = 1440
+        min_period = max(period, int(range_seconds / max_datapoints))
+        # Round up to nearest multiple of 60
+        min_period = ((min_period + 59) // 60) * 60
+
         params = {
             'Namespace': METRICS_NAMESPACE,
             'MetricName': metric_name,
             'StartTime': datetime.fromtimestamp(start_time / 1000),
             'EndTime': datetime.fromtimestamp(end_time / 1000),
-            'Period': period,
+            'Period': min_period,
             'Statistics': [statistic]
         }
         
