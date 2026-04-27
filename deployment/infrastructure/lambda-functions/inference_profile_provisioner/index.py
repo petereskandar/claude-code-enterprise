@@ -4,8 +4,10 @@
 
 import json
 import logging
+import os
 import re
 import hashlib
+from datetime import datetime, timezone
 
 import boto3
 from botocore.exceptions import ClientError
@@ -20,26 +22,90 @@ _EU_REGIONS = {
     "eu-north-1", "eu-south-1", "eu-south-2",
 }
 
-# Inference profile model definitions — must stay in sync with models.py
-INFERENCE_PROFILE_MODELS = {
-    "opus-4-6": {
-        "cross_region_profile_id": "{geo}.anthropic.claude-opus-4-6-v1",
-        "enabled": True,
-    },
-    "sonnet-4-6": {
-        "cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",
-        "enabled": True,
-    },
-    "haiku-4-5": {
-        "cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "enabled": True,
-    },
-}
+
+def _load_models() -> dict:
+    """Load inference profile models from INFERENCE_PROFILE_MODELS_JSON env var.
+
+    The env var is populated by CloudFormation from SSM Parameter Store
+    (/claude-code/inference-profile-models). To add/remove/change models,
+    update the SSM parameter — no Lambda redeploy needed.
+    """
+    _FALLBACK = {
+        "opus-4-7": {
+            "cross_region_profile_id": "{geo}.anthropic.claude-opus-4-7",
+            "enabled": True,
+        },
+        "sonnet-4-6": {
+            "cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",
+            "enabled": True,
+        },
+        "haiku-4-5": {
+            "cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "enabled": True,
+        },
+    }
+    raw = os.environ.get("INFERENCE_PROFILE_MODELS_JSON")
+    if not raw:
+        logger.warning("INFERENCE_PROFILE_MODELS_JSON env var not set — using built-in fallback")
+        return _FALLBACK
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse INFERENCE_PROFILE_MODELS_JSON: %s — using built-in fallback", e)
+        return _FALLBACK
+
+
+INFERENCE_PROFILE_MODELS = _load_models()
+logger.info("Loaded %d model(s) from config: %s", len(INFERENCE_PROFILE_MODELS), list(INFERENCE_PROFILE_MODELS.keys()))
 
 _MAX_TAG_VALUE = 256
 
 # Basic email validation — rejects obviously malformed inputs
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# DynamoDB mapping table (optional — populated when dashboard stack is deployed)
+_MAPPING_TABLE = None
+
+
+def _get_mapping_table():
+    global _MAPPING_TABLE
+    if _MAPPING_TABLE is None:
+        name = os.environ.get("INFERENCE_PROFILE_MAPPING_TABLE")
+        if name:
+            _MAPPING_TABLE = boto3.resource("dynamodb").Table(name)
+    return _MAPPING_TABLE
+
+
+def _model_name(model_key: str) -> str:
+    """Derive a friendly model name from the cross_region_profile_id config."""
+    entry = INFERENCE_PROFILE_MODELS.get(model_key, {})
+    crid = entry.get("cross_region_profile_id", "")
+    name = crid.split(".")[-1] if "." in crid else model_key
+    for sfx in ["-v1:0", "-v2:0", "-v1", "-v2"]:
+        if sfx in name:
+            name = name[:name.rfind(sfx)]
+            break
+    return re.sub(r"-\d{8}$", "", name)
+
+
+def _write_mapping(arns: dict, email: str) -> None:
+    """Write inference profile ARN → email/model mappings to DynamoDB."""
+    table = _get_mapping_table()
+    if not table:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    for mk, arn in arns.items():
+        try:
+            table.put_item(Item={
+                "profileArn": arn,
+                "email": email.lower(),
+                "model": _model_name(mk),
+                "modelKey": mk,
+                "profileId": arn.split("/")[-1],
+                "createdAt": now,
+            })
+        except Exception as e:
+            logger.warning("Could not write mapping for '%s': %s", mk, e)
 
 
 def _get_geo(region: str) -> str:
@@ -65,7 +131,7 @@ def _get_profile_name(email: str, model_key: str) -> str:
 
 def _build_tags(email: str, claims: dict) -> list[dict]:
     tags = [
-        {"key": "user.email", "value": email[:_MAX_TAG_VALUE]},
+        {"key": "user.email", "value": email.lower()[:_MAX_TAG_VALUE]},
         # status=enabled by default; QuotaEnforcer Lambda sets to disabled when quota exceeded
         {"key": "status", "value": "enabled"},
     ]
@@ -105,7 +171,7 @@ def handler(event, context):
         { "email": "user@example.com", "claims": { ... } }
 
     Returns:
-        { "profile_arns": { "opus-4-6": "arn:...", "sonnet-4-6": "arn:...", ... } }
+        { "profile_arns": { "opus-4-7": "arn:...", "sonnet-4-6": "arn:...", ... } }
     """
     region = boto3.session.Session().region_name
     bedrock = boto3.client("bedrock", region_name=region)
@@ -146,6 +212,7 @@ def handler(event, context):
     # If all profiles already exist, return immediately — no create calls needed
     if all(mk in profile_arns for mk in enabled_models):
         logger.info("All %d profiles already exist for %s — skipping creation", len(profile_arns), email)
+        _write_mapping(profile_arns, email)
         return {
             "statusCode": 200,
             "body": json.dumps({"profile_arns": profile_arns}),
@@ -178,6 +245,7 @@ def handler(event, context):
         except Exception as e:
             logger.warning("Unexpected error creating profile for '%s': %s", model_key, e)
 
+    _write_mapping(profile_arns, email)
     logger.info("Returning %d profile ARN(s) for %s", len(profile_arns), email)
     return {
         "statusCode": 200,
