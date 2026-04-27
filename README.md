@@ -28,7 +28,7 @@ This fork extends the official guidance with additional components for enterpris
 
 | Add-On | Description | Stack |
 |---|---|---|
-| **CloudWatch Dashboard** | Real-time visibility on token usage, costs, active users, cache efficiency, and per-model breakdown — all via embedded custom widget Lambdas | `claude-code-dashboard` |
+| **CloudWatch Dashboard** | Real-time visibility on token usage, costs, active users, cache efficiency, and per-model breakdown. Includes `InferenceProfileMapping` DynamoDB table for ARN-to-user mapping and native Logs Insights widgets for time-series token analysis (up to 34 days) | `claude-code-dashboard` |
 | **Quota Enforcement** | Per-user monthly/daily token limits with fine-grained policies (user, group, default). API Gateway + JWT authorizer for real-time quota checks, SNS alerts at 80%/90% thresholds, server-side blocking via inference profile tagging | `claude-code-quota` |
 | **Metrics Aggregation** | EventBridge-scheduled Lambda that aggregates OTel logs into CloudWatch custom metrics (namespace `ClaudeCode`) at 5-minute intervals | `claude-code-metrics-aggregation` |
 | **Logs Insights Queries** | 19 pre-built CloudWatch Logs Insights queries: real-time TPM/RPM, cost analysis by user/model, cache hit rates, peak usage windows, session deep dives | `claude-code-logs-insights` |
@@ -363,18 +363,21 @@ On each user's **first login**, the credential provider automatically:
 
 1. Creates one Bedrock Application Inference Profile per enabled model, named `claude-code-{email-hash}-{model-key}`
 2. Tags each profile with `user.email`, `cost_center`, `department`, `organization` (from the OIDC JWT claims)
-3. Patches `~/.claude.json` with the ARN of the default model so Claude Code uses it immediately
+3. Writes the profile ARN → email/model mapping to the `InferenceProfileMapping` DynamoDB table (used by the BedrockMetricsBridge Lambda)
+4. Patches `~/.claude.json` with the ARN of the default model so Claude Code uses it immediately
 
 From that point, every Claude Code invocation is tracked in CloudWatch under the `Bedrock` namespace with the user's tags, with no further setup needed.
 
+The **BedrockMetricsBridge** Lambda runs every 5 minutes via EventBridge, reads all profile mappings from DynamoDB, fetches `InputTokenCount`/`OutputTokenCount`/`CacheReadInputTokenCount`/`CacheWriteInputTokenCount` from the `AWS/Bedrock` CloudWatch namespace, and writes OTEL/EMF-formatted log records to `/aws/claude-code/metrics`. This feeds all dashboard widgets and quota checks without requiring any client-side telemetry. The DynamoDB-based approach scales to 500+ users without Bedrock API throttling (the previous approach called `ListInferenceProfiles` + `ListTagsForResource` per profile).
+
 ### Default Models
 
-Three models are pre-configured. To add or retire a model, update `INFERENCE_PROFILE_MODELS` in [source/claude_code_with_bedrock/models.py](source/claude_code_with_bedrock/models.py):
+Three models are pre-configured. Models are loaded from the SSM parameter `/claude-code/inference-profile-models` at runtime — update the parameter to add, remove, or change models without redeploying the Lambda. The Lambda falls back to a built-in default if the parameter is missing.
 
 | Model Key | Model | Role |
 |---|---|---|
 | `sonnet-4-6` | Claude Sonnet 4.6 | **Default** — recommended for most workloads |
-| `opus-4-6` | Claude Opus 4.6 | Most capable — complex reasoning |
+| `opus-4-7` | Claude Opus 4.7 | Most capable — complex reasoning |
 | `haiku-4-5` | Claude Haiku 4.5 | Fastest and most cost-effective |
 
 ### Prerequisites
@@ -443,7 +446,7 @@ Expected output:
 Your Bedrock Application Inference Profiles
 
   Model Key    Display Name          ARN                                                                      Default
-  opus-4-6     Claude Opus 4.6       arn:aws:bedrock:eu-central-1:123456789:application-inference-profile/…
+  opus-4-7     Claude Opus 4.7       arn:aws:bedrock:eu-central-1:123456789:application-inference-profile/…
   sonnet-4-6   Claude Sonnet 4.6     arn:aws:bedrock:eu-central-1:123456789:application-inference-profile/…   ●
   haiku-4-5    Claude Haiku 4.5      arn:aws:bedrock:eu-central-1:123456789:application-inference-profile/…
 
@@ -455,7 +458,7 @@ Default model in ~/.claude.json: arn:aws:bedrock:eu-central-1:123456789:applicat
 Users can switch their active model at any time without re-authenticating:
 
 ```bash
-ccwb profiles set-default opus-4-6
+ccwb profiles set-default opus-4-7
 ```
 
 This updates `~/.claude.json` immediately. The change takes effect on the next Claude Code command.
@@ -482,23 +485,20 @@ aws cloudwatch put-metric-alarm \
 
 ### Adding a New Claude Model
 
-When Anthropic releases a new model, add it to `INFERENCE_PROFILE_MODELS` in [source/claude_code_with_bedrock/models.py](source/claude_code_with_bedrock/models.py):
+When Anthropic releases a new model, update the SSM parameter `/claude-code/inference-profile-models`:
 
-```python
-INFERENCE_PROFILE_MODELS = {
-    # ... existing models ...
-    "new-model-key": {
-        "source_model_arn": "arn:aws:bedrock:{region}::foundation-model/anthropic.claude-new-model-v1:0",
-        "display_name": "Claude New Model",
-        "description": "Description of the new model",
-        "enabled": True,
-    },
+```json
+{
+  "new-model-key": {
+    "cross_region_profile_id": "{geo}.anthropic.claude-new-model-v1",
+    "enabled": true
+  }
 }
 ```
 
-Re-deploy and re-package. On their next login, each user will automatically get a new Application Inference Profile for the new model.
+No Lambda redeploy is needed — the provisioner reads from SSM at runtime. On their next login, each user will automatically get a new Application Inference Profile for the new model.
 
-To retire a model without deleting existing profiles, set `"enabled": False`. The model will no longer be created for new users and will be excluded from `ccwb profiles list`.
+To retire a model without deleting existing profiles, set `"enabled": false`. The model will no longer be created for new users and will be excluded from `ccwb profiles list`.
 
 ### Compatibility with the OpenTelemetry Stack
 
@@ -532,7 +532,8 @@ Related Lambdas (fixed names, not stack-dependent):
 - `ClaudeCode-QuotaCheck` — real-time quota check for credential issuance
 - `ClaudeCode-QuotaEnforcer` — tags profiles enabled/disabled based on usage
 - `ClaudeCode-QuotaMonitor` — monitors usage and sends SNS alerts
-- `ClaudeCode-InferenceProfileProvisioner` — creates per-user inference profiles on first login
+- `ClaudeCode-InferenceProfileProvisioner` — creates per-user inference profiles on first login, writes ARN mapping to DynamoDB
+- `ClaudeCode-BedrockMetricsBridge` — reads AWS/Bedrock metrics per user via DynamoDB mapping and writes OTEL/EMF logs to `/aws/claude-code/metrics` every 5 minutes
 
 ### Session Tags & ABAC Configuration
 
