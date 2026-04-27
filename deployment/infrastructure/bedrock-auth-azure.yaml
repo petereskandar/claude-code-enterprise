@@ -59,6 +59,13 @@ Parameters:
       When true, users can ONLY invoke Bedrock via their own Application Inference Profiles.
       Direct access to foundation models and cross-region inference profiles is denied.
 
+  DashboardStackName:
+    Type: String
+    Default: ''
+    Description: >-
+      Stack name of the claude-code-dashboard stack. When InferenceProfilesEnabled=true,
+      used to import the InferenceProfileMapping DynamoDB table for the provisioner.
+
 Conditions:
   UseDirectIAM: !Equals [!Ref FederationType, direct]
   UseCognitoIdentity: !Equals [!Ref FederationType, cognito]
@@ -66,6 +73,8 @@ Conditions:
   UseInferenceProfiles: !Equals [!Ref InferenceProfilesEnabled, 'true']
   UseDirectModels: !Not [!Equals [!Ref InferenceProfilesEnabled, 'true']]
   # Partition-aware conditions for Cognito Identity service principals
+  HasDashboardStack: !Not [!Equals [!Ref DashboardStackName, '']]
+  HasMappingTable: !And [!Condition UseInferenceProfiles, !Condition HasDashboardStack]
   IsGovCloudWest: !Equals [!Ref 'AWS::Region', 'us-gov-west-1']
   IsGovCloudEast: !Equals [!Ref 'AWS::Region', 'us-gov-east-1']
   IsGovCloud: !Or [!Condition IsGovCloudWest, !Condition IsGovCloudEast]
@@ -101,32 +110,39 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: AllowBedrockInvokeRegional
-            Effect: Allow
-            Action:
-              - 'bedrock:InvokeModel'
-              - 'bedrock:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:InvokeModel'
-              - 'bedrock-runtime:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:ConverseStream'
-              - 'bedrock-runtime:Converse'
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
-              - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/*'
-            Condition:
-              StringEquals:
-                'aws:RequestedRegion': !Ref AllowedBedrockRegions
-          - Sid: AllowBedrockInvokeGlobal
-            Effect: Allow
-            Action:
-              - 'bedrock:InvokeModel'
-              - 'bedrock:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:InvokeModel'
-              - 'bedrock-runtime:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:ConverseStream'
-              - 'bedrock-runtime:Converse'
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+          # --- Direct model access (only when inference profiles are DISABLED) ---
+          - !If
+            - UseDirectModels
+            - Sid: AllowBedrockInvokeRegional
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/*'
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+            - !Ref 'AWS::NoValue'
+          - !If
+            - UseDirectModels
+            - Sid: AllowBedrockInvokeGlobal
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+            - !Ref 'AWS::NoValue'
           - Sid: AllowBedrockListRegional
             Effect: Allow
             Action:
@@ -148,6 +164,7 @@ Resources:
               - 'bedrock:ListInferenceProfiles'
               - 'bedrock:GetInferenceProfile'
             Resource: '*'
+          # --- Application inference profile access (only when inference profiles are ENABLED) ---
           - !If
             - UseInferenceProfiles
             - Sid: AllowBedrockInvokeOwnApplicationProfiles
@@ -165,7 +182,63 @@ Resources:
                 StringEquals:
                   'aws:RequestedRegion': !Ref AllowedBedrockRegions
                   'aws:ResourceTag/status': 'enabled'
+                StringEqualsIgnoreCase:
+                  'aws:ResourceTag/user.email': '${aws:PrincipalTag/UserEmail}'
             - !Ref 'AWS::NoValue'
+          - !If
+            - UseInferenceProfiles
+            - Sid: AllowBedrockInvokeFoundationModelViaInferenceProfile
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                # EU cross-region inference profile system ARNs
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-haiku-4-5-20251001-v1:0'
+                # US cross-region inference profile system ARNs
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0'
+                # EU foundation-model ARNs (destination regions for eu.* profiles)
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                # US foundation-model ARNs (destination regions for us.* profiles)
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-opus-4-7'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
+              Condition:
+                StringLike:
+                  'bedrock:InferenceProfileArn': !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
+            - !Ref 'AWS::NoValue'
+          # --- Inference profile provisioner Lambda invocation (only when inference profiles are ENABLED) ---
           - !If
             - UseInferenceProfiles
             - Sid: AllowInvokeInferenceProfileProvisioner
@@ -173,6 +246,20 @@ Resources:
               Action:
                 - 'lambda:InvokeFunction'
               Resource: !GetAtt InferenceProfileProvisionerFunction.Arn
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+            - !Ref 'AWS::NoValue'
+          # --- Self-assume for session tag injection (Cognito + inference profiles) ---
+          - !If
+            - UseInferenceProfiles
+            - Sid: AllowSelfAssumeWithTags
+              Effect: Allow
+              Action:
+                - 'sts:AssumeRole'
+                - 'sts:TagSession'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
             - !Ref 'AWS::NoValue'
           - Sid: AllowMarketplaceSubscriptions
             Effect: Allow
@@ -234,7 +321,7 @@ Resources:
     Properties:
       IdentityPoolName: !Ref IdentityPoolName
       AllowUnauthenticatedIdentities: false
-      AllowClassicFlow: false
+      AllowClassicFlow: true
       OpenIdConnectProviderARNs:
         - !GetAtt AzureOIDCProvider.Arn
 
@@ -257,6 +344,7 @@ Resources:
                   - cognito-identity.amazonaws.com
             Action:
               - 'sts:AssumeRoleWithWebIdentity'
+              - 'sts:TagSession'
             Condition:
               StringEquals:
                 !If
@@ -274,6 +362,21 @@ Resources:
                     - IsGovCloudEast
                     - 'cognito-identity.us-gov-east-1.amazonaws.com:amr': authenticated
                     - 'cognito-identity.amazonaws.com:amr': authenticated
+          # Self-assume: allows role chaining with explicit session tags
+          # Cognito PrincipalTags don't work with external OIDC providers, so
+          # credential-process chains: Cognito creds -> AssumeRole(self, Tags) -> tagged session
+          - !If
+            - UseInferenceProfiles
+            - Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+              Action:
+                - 'sts:AssumeRole'
+                - 'sts:TagSession'
+              Condition:
+                ArnLike:
+                  'aws:PrincipalArn': !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-*'
+            - !Ref 'AWS::NoValue'
       ManagedPolicyArns:
         - !Ref BedrockAccessPolicy
       Tags:
@@ -407,9 +510,41 @@ Resources:
                 Condition:
                   StringEquals:
                     'aws:RequestedRegion': !Ref AllowedBedrockRegions
+        - !If
+          - HasMappingTable
+          - PolicyName: InferenceProfileMappingWrite
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - 'dynamodb:PutItem'
+                    - 'dynamodb:BatchWriteItem'
+                  Resource:
+                    - !ImportValue
+                        Fn::Sub: '${DashboardStackName}-InferenceProfileMappingTableArn'
+          - !Ref 'AWS::NoValue'
       Tags:
         - Key: Purpose
           Value: Claude Code Inference Profile Provisioner
+
+  InferenceProfileModelsParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseInferenceProfiles
+    Properties:
+      Name: '/claude-code/inference-profile-models'
+      Type: String
+      Description: >-
+        JSON configuration for Bedrock inference profile models.
+        Update this parameter to add/remove/change models without redeploying the Lambda.
+      Value: !Sub |
+        {
+          "opus-4-7":   {"cross_region_profile_id": "{geo}.anthropic.claude-opus-4-7",             "enabled": true},
+          "sonnet-4-6": {"cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",           "enabled": true},
+          "haiku-4-5":  {"cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0", "enabled": true}
+        }
+      Tags:
+        Purpose: Claude Code Inference Profile Models
 
   InferenceProfileProvisionerLogGroup:
     Type: AWS::Logs::LogGroup
@@ -425,9 +560,8 @@ Resources:
     Properties:
       FunctionName: 'ClaudeCode-InferenceProfileProvisioner'
       Description: >-
-        Provisions Bedrock Application Inference Profiles for authenticated users.
-        Sole principal with bedrock:CreateInferenceProfile — users invoke this instead
-        of calling the Bedrock management plane directly.
+        Provisions per-user Bedrock Application Inference Profiles.
+        Model config from SSM /claude-code/inference-profile-models.
       Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt InferenceProfileProvisionerRole.Arn
@@ -435,20 +569,56 @@ Resources:
       MemorySize: 128
       LoggingConfig:
         LogGroup: '/aws/lambda/ClaudeCode-InferenceProfileProvisioner'
+      Environment:
+        Variables:
+          INFERENCE_PROFILE_MODELS_JSON: !GetAtt InferenceProfileModelsParameter.Value
+          INFERENCE_PROFILE_MAPPING_TABLE: !If
+            - HasMappingTable
+            - !ImportValue
+                Fn::Sub: '${DashboardStackName}-InferenceProfileMappingTableName'
+            - ''
       Code:
         ZipFile: |
-          import json, logging, re, hashlib, boto3
+          import json, logging, os, re, hashlib, boto3
+          from datetime import datetime, timezone
           from botocore.exceptions import ClientError
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
           _EU_REGIONS = {"eu-west-1","eu-west-2","eu-west-3","eu-central-1","eu-central-2","eu-north-1","eu-south-1","eu-south-2"}
-          INFERENCE_PROFILE_MODELS = {
-            "opus-4-6":  {"cross_region_profile_id": "{geo}.anthropic.claude-opus-4-6-v1",            "enabled": True},
-            "sonnet-4-6":{"cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",             "enabled": True},
-            "haiku-4-5": {"cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0","enabled": True},
-          }
+          def _load_models():
+            raw = os.environ.get("INFERENCE_PROFILE_MODELS_JSON", "{}")
+            try:
+              return json.loads(raw)
+            except json.JSONDecodeError as e:
+              logger.error("Failed to parse INFERENCE_PROFILE_MODELS_JSON: %s", e)
+              return {}
+          INFERENCE_PROFILE_MODELS = _load_models()
+          logger.info("Loaded %d model(s) from config: %s", len(INFERENCE_PROFILE_MODELS), list(INFERENCE_PROFILE_MODELS.keys()))
           _MAX_TAG_VALUE = 256
           _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+          _MAPPING_TABLE = None
+          def _get_mapping_table():
+            global _MAPPING_TABLE
+            if _MAPPING_TABLE is None:
+              name = os.environ.get("INFERENCE_PROFILE_MAPPING_TABLE")
+              if name:
+                _MAPPING_TABLE = boto3.resource("dynamodb").Table(name)
+            return _MAPPING_TABLE
+          def _model_name(mk):
+            e = INFERENCE_PROFILE_MODELS.get(mk, {})
+            crid = e.get("cross_region_profile_id", "")
+            n = crid.split(".")[-1] if "." in crid else mk
+            for sfx in ["-v1:0","-v2:0","-v1","-v2"]:
+              if sfx in n: n = n[:n.rfind(sfx)]; break
+            return re.sub(r"-\d{8}$", "", n)
+          def _write_mapping(arns, email):
+            tbl = _get_mapping_table()
+            if not tbl: return
+            now = datetime.now(timezone.utc).isoformat()
+            for mk, arn in arns.items():
+              try:
+                tbl.put_item(Item={"profileArn":arn,"email":email.lower(),"model":_model_name(mk),"modelKey":mk,"profileId":arn.split("/")[-1],"createdAt":now})
+              except Exception as e: logger.warning("Could not write mapping for '%s': %s", mk, e)
           def _geo(region): return "eu" if region in _EU_REGIONS else "us"
           def _source_arn(model_key, region):
             e = INFERENCE_PROFILE_MODELS[model_key]
@@ -460,12 +630,15 @@ Resources:
             suffix = f"-{h}-{model_key}"
             return f"claude-code-{s[:64-12-len(suffix)]}{suffix}"
           def _tags(email, claims):
-            tags = [{"key":"user.email","value":email[:_MAX_TAG_VALUE]},{"key":"status","value":"enabled"}]
+            tags = [{"key":"user.email","value":email.lower()[:_MAX_TAG_VALUE]},{"key":"status","value":"enabled"}]
             for ck, tk in [("custom:cost_center","cost_center"),("custom:department","department"),("custom:organization","organization"),("custom:team","team")]:
               v = claims.get(ck)
               if v: tags.append({"key":tk,"value":str(v)[:_MAX_TAG_VALUE]})
             return tags
           def handler(event, context):
+            if not INFERENCE_PROFILE_MODELS:
+              logger.error("No models configured — check INFERENCE_PROFILE_MODELS_JSON env var")
+              return {"statusCode":500,"body":json.dumps({"error":"No models configured"})}
             region = boto3.session.Session().region_name
             bedrock = boto3.client("bedrock", region_name=region)
             email = (event.get("email") or "").strip()
@@ -488,6 +661,7 @@ Resources:
             except Exception as e: logger.warning("Could not list profiles: %s", e)
             if all(mk in arns for mk in enabled):
               logger.info("All %d profiles exist for %s", len(arns), email)
+              _write_mapping(arns, email)
               return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
             for mk in enabled:
               if mk in arns: continue
@@ -499,6 +673,7 @@ Resources:
                 logger.info("Created '%s': %s", mk, arns[mk])
               except ClientError as e: logger.warning("Could not create profile for '%s': %s", mk, e)
               except Exception as e: logger.warning("Unexpected error for '%s': %s", mk, e)
+            _write_mapping(arns, email)
             logger.info("Returning %d ARN(s) for %s", len(arns), email)
             return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
       Tags:
