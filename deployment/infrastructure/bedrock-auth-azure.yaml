@@ -164,6 +164,11 @@ Resources:
               - 'bedrock:ListInferenceProfiles'
               - 'bedrock:GetInferenceProfile'
             Resource: '*'
+          - Sid: AllowBedrockCallWithBearerToken
+            Effect: Allow
+            Action:
+              - 'bedrock:CallWithBearerToken'
+            Resource: '*'
           # --- Application inference profile access (only when inference profiles are ENABLED) ---
           - !If
             - UseInferenceProfiles
@@ -524,6 +529,15 @@ Resources:
                     - !ImportValue
                         Fn::Sub: '${DashboardStackName}-InferenceProfileMappingTableArn'
           - !Ref 'AWS::NoValue'
+        - PolicyName: SSMReadUserGroups
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/claude-code/user-groups'
       Tags:
         - Key: Purpose
           Value: Claude Code Inference Profile Provisioner
@@ -546,6 +560,24 @@ Resources:
       Tags:
         Purpose: Claude Code Inference Profile Models
 
+  UserGroupsParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseInferenceProfiles
+    Properties:
+      Name: '/claude-code/user-groups'
+      Type: String
+      Description: >-
+        Mapping of Entra ID group GUIDs to group names for Claude Code access tiers.
+        Update this parameter to add/remove groups without redeploying the Lambda.
+      Value: |
+        {
+          "9f0c1c65-3a5b-497c-b0cb-35aa6a20e2b1": "AWSClaudeCodePowerUsers",
+          "cd356a8c-3361-4a27-b855-3b2c9b831da9": "AWSClaudeCodeStandardUsers",
+          "aa191b61-f9dd-44ce-a251-c7c244ddb902": "AWSClaudeCodeBasicUsers"
+        }
+      Tags:
+        Purpose: Claude Code User Group Mapping
+
   InferenceProfileProvisionerLogGroup:
     Type: AWS::Logs::LogGroup
     Condition: UseInferenceProfiles
@@ -562,6 +594,7 @@ Resources:
       Description: >-
         Provisions per-user Bedrock Application Inference Profiles.
         Model config from SSM /claude-code/inference-profile-models.
+        Resolves user groups from JWT via SSM /claude-code/user-groups.
       Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt InferenceProfileProvisionerRole.Arn
@@ -597,6 +630,7 @@ Resources:
           _MAX_TAG_VALUE = 256
           _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
           _MAPPING_TABLE = None
+          _USER_GROUPS_MAP = None
           def _get_mapping_table():
             global _MAPPING_TABLE
             if _MAPPING_TABLE is None:
@@ -604,6 +638,23 @@ Resources:
               if name:
                 _MAPPING_TABLE = boto3.resource("dynamodb").Table(name)
             return _MAPPING_TABLE
+          def _get_user_groups_map():
+            global _USER_GROUPS_MAP
+            if _USER_GROUPS_MAP is None:
+              ssm = boto3.client("ssm")
+              try:
+                resp = ssm.get_parameter(Name="/claude-code/user-groups")
+                _USER_GROUPS_MAP = json.loads(resp["Parameter"]["Value"])
+                logger.info("Loaded %d group(s) from SSM", len(_USER_GROUPS_MAP))
+              except Exception as e:
+                logger.warning("Could not load user groups from SSM: %s", e)
+                _USER_GROUPS_MAP = {}
+            return _USER_GROUPS_MAP
+          def _resolve_groups(jwt_groups):
+            if not jwt_groups: return []
+            groups_map = _get_user_groups_map()
+            if not groups_map: return []
+            return [groups_map[gid] for gid in jwt_groups if gid in groups_map]
           def _model_name(mk):
             e = INFERENCE_PROFILE_MODELS.get(mk, {})
             crid = e.get("cross_region_profile_id", "")
@@ -611,13 +662,15 @@ Resources:
             for sfx in ["-v1:0","-v2:0","-v1","-v2"]:
               if sfx in n: n = n[:n.rfind(sfx)]; break
             return re.sub(r"-\d{8}$", "", n)
-          def _write_mapping(arns, email):
+          def _write_mapping(arns, email, groups):
             tbl = _get_mapping_table()
             if not tbl: return
             now = datetime.now(timezone.utc).isoformat()
             for mk, arn in arns.items():
               try:
-                tbl.put_item(Item={"profileArn":arn,"email":email.lower(),"model":_model_name(mk),"modelKey":mk,"profileId":arn.split("/")[-1],"createdAt":now})
+                item = {"profileArn":arn,"email":email.lower(),"model":_model_name(mk),"modelKey":mk,"profileId":arn.split("/")[-1],"createdAt":now}
+                if groups: item["groups"] = groups
+                tbl.put_item(Item=item)
               except Exception as e: logger.warning("Could not write mapping for '%s': %s", mk, e)
           def _geo(region): return "eu" if region in _EU_REGIONS else "us"
           def _source_arn(model_key, region):
@@ -625,19 +678,21 @@ Resources:
             pid = e["cross_region_profile_id"].format(geo=_geo(region))
             return f"arn:aws:bedrock:{region}::inference-profile/{pid}"
           def _profile_name(email, model_key):
+            email = email.lower()
             h = hashlib.sha256(email.encode()).hexdigest()[:8]
-            s = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", email.lower())).strip("-")
+            s = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", email)).strip("-")
             suffix = f"-{h}-{model_key}"
             return f"claude-code-{s[:64-12-len(suffix)]}{suffix}"
-          def _tags(email, claims):
+          def _tags(email, claims, groups):
             tags = [{"key":"user.email","value":email.lower()[:_MAX_TAG_VALUE]},{"key":"status","value":"enabled"}]
             for ck, tk in [("custom:cost_center","cost_center"),("custom:department","department"),("custom:organization","organization"),("custom:team","team")]:
               v = claims.get(ck)
               if v: tags.append({"key":tk,"value":str(v)[:_MAX_TAG_VALUE]})
+            if groups: tags.append({"key":"user.group","value":groups[0][:_MAX_TAG_VALUE]})
             return tags
           def handler(event, context):
             if not INFERENCE_PROFILE_MODELS:
-              logger.error("No models configured ??? check INFERENCE_PROFILE_MODELS_JSON env var")
+              logger.error("No models configured - check INFERENCE_PROFILE_MODELS_JSON env var")
               return {"statusCode":500,"body":json.dumps({"error":"No models configured"})}
             region = boto3.session.Session().region_name
             bedrock = boto3.client("bedrock", region_name=region)
@@ -646,7 +701,10 @@ Resources:
               logger.error("Invalid or missing email: %r", email)
               return {"statusCode":400,"body":json.dumps({"error":"Invalid or missing email in payload"})}
             claims = event.get("claims") or {}
-            tags = _tags(email, claims)
+            jwt_groups = event.get("groups") or claims.get("groups") or []
+            groups = _resolve_groups(jwt_groups)
+            if groups: logger.info("Resolved groups for %s: %s", email, groups)
+            tags = _tags(email, claims, groups)
             arns = {}
             enabled = {k:v for k,v in INFERENCE_PROFILE_MODELS.items() if v.get("enabled")}
             expected = {_profile_name(email, mk): mk for mk in enabled}
@@ -661,8 +719,8 @@ Resources:
             except Exception as e: logger.warning("Could not list profiles: %s", e)
             if all(mk in arns for mk in enabled):
               logger.info("All %d profiles exist for %s", len(arns), email)
-              _write_mapping(arns, email)
-              return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
+              _write_mapping(arns, email, groups)
+              return {"statusCode":200,"body":json.dumps({"profile_arns":arns,"groups":groups})}
             for mk in enabled:
               if mk in arns: continue
               pname = _profile_name(email, mk)
@@ -673,9 +731,9 @@ Resources:
                 logger.info("Created '%s': %s", mk, arns[mk])
               except ClientError as e: logger.warning("Could not create profile for '%s': %s", mk, e)
               except Exception as e: logger.warning("Unexpected error for '%s': %s", mk, e)
-            _write_mapping(arns, email)
+            _write_mapping(arns, email, groups)
             logger.info("Returning %d ARN(s) for %s", len(arns), email)
-            return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
+            return {"statusCode":200,"body":json.dumps({"profile_arns":arns,"groups":groups})}
       Tags:
         - Key: Purpose
           Value: Claude Code Inference Profile Provisioner
