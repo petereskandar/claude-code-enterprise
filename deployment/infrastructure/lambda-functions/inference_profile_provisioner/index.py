@@ -16,6 +16,7 @@ logger.info("Loaded %d model(s) from config: %s", len(INFERENCE_PROFILE_MODELS),
 _MAX_TAG_VALUE = 256
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MAPPING_TABLE = None
+_USER_GROUPS_MAP = None
 def _get_mapping_table():
   global _MAPPING_TABLE
   if _MAPPING_TABLE is None:
@@ -23,6 +24,30 @@ def _get_mapping_table():
     if name:
       _MAPPING_TABLE = boto3.resource("dynamodb").Table(name)
   return _MAPPING_TABLE
+def _get_user_groups_map():
+  global _USER_GROUPS_MAP
+  if _USER_GROUPS_MAP is None:
+    ssm = boto3.client("ssm")
+    try:
+      resp = ssm.get_parameter(Name="/claude-code/user-groups")
+      _USER_GROUPS_MAP = json.loads(resp["Parameter"]["Value"])
+      logger.info("Loaded %d group(s) from SSM", len(_USER_GROUPS_MAP))
+    except Exception as e:
+      logger.warning("Could not load user groups from SSM: %s", e)
+      _USER_GROUPS_MAP = {}
+  return _USER_GROUPS_MAP
+def _resolve_groups(jwt_groups):
+  if not jwt_groups:
+    return []
+  groups_map = _get_user_groups_map()
+  if not groups_map:
+    return []
+  resolved = []
+  for gid in jwt_groups:
+    name = groups_map.get(gid)
+    if name:
+      resolved.append(name)
+  return resolved
 def _model_name(mk):
   e = INFERENCE_PROFILE_MODELS.get(mk, {})
   crid = e.get("cross_region_profile_id", "")
@@ -30,13 +55,16 @@ def _model_name(mk):
   for sfx in ["-v1:0","-v2:0","-v1","-v2"]:
     if sfx in n: n = n[:n.rfind(sfx)]; break
   return re.sub(r"-\d{8}$", "", n)
-def _write_mapping(arns, email):
+def _write_mapping(arns, email, groups):
   tbl = _get_mapping_table()
   if not tbl: return
   now = datetime.now(timezone.utc).isoformat()
   for mk, arn in arns.items():
     try:
-      tbl.put_item(Item={"profileArn":arn,"email":email.lower(),"model":_model_name(mk),"modelKey":mk,"profileId":arn.split("/")[-1],"createdAt":now})
+      item = {"profileArn":arn,"email":email.lower(),"model":_model_name(mk),"modelKey":mk,"profileId":arn.split("/")[-1],"createdAt":now}
+      if groups:
+        item["groups"] = groups
+      tbl.put_item(Item=item)
     except Exception as e: logger.warning("Could not write mapping for '%s': %s", mk, e)
 def _geo(region): return "eu" if region in _EU_REGIONS else "us"
 def _source_arn(model_key, region):
@@ -44,19 +72,22 @@ def _source_arn(model_key, region):
   pid = e["cross_region_profile_id"].format(geo=_geo(region))
   return f"arn:aws:bedrock:{region}::inference-profile/{pid}"
 def _profile_name(email, model_key):
+  email = email.lower()
   h = hashlib.sha256(email.encode()).hexdigest()[:8]
-  s = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", email.lower())).strip("-")
+  s = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", email)).strip("-")
   suffix = f"-{h}-{model_key}"
-  return f"claude-code-{s[:64-12-len(suffix)]}{suffix}"
-def _tags(email, claims):
+  return f"claude-code-{s[:64-12-len(suffix)].strip('-')}{suffix}"
+def _tags(email, claims, groups):
   tags = [{"key":"user.email","value":email.lower()[:_MAX_TAG_VALUE]},{"key":"status","value":"enabled"}]
   for ck, tk in [("custom:cost_center","cost_center"),("custom:department","department"),("custom:organization","organization"),("custom:team","team")]:
     v = claims.get(ck)
     if v: tags.append({"key":tk,"value":str(v)[:_MAX_TAG_VALUE]})
+  if groups:
+    tags.append({"key":"user.group","value":groups[0][:_MAX_TAG_VALUE]})
   return tags
 def handler(event, context):
   if not INFERENCE_PROFILE_MODELS:
-    logger.error("No models configured â€” check INFERENCE_PROFILE_MODELS_JSON env var")
+    logger.error("No models configured - check INFERENCE_PROFILE_MODELS_JSON env var")
     return {"statusCode":500,"body":json.dumps({"error":"No models configured"})}
   region = boto3.session.Session().region_name
   bedrock = boto3.client("bedrock", region_name=region)
@@ -65,7 +96,11 @@ def handler(event, context):
     logger.error("Invalid or missing email: %r", email)
     return {"statusCode":400,"body":json.dumps({"error":"Invalid or missing email in payload"})}
   claims = event.get("claims") or {}
-  tags = _tags(email, claims)
+  jwt_groups = event.get("groups") or claims.get("groups") or []
+  groups = _resolve_groups(jwt_groups)
+  if groups:
+    logger.info("Resolved groups for %s: %s", email, groups)
+  tags = _tags(email, claims, groups)
   arns = {}
   enabled = {k:v for k,v in INFERENCE_PROFILE_MODELS.items() if v.get("enabled")}
   expected = {_profile_name(email, mk): mk for mk in enabled}
@@ -80,8 +115,8 @@ def handler(event, context):
   except Exception as e: logger.warning("Could not list profiles: %s", e)
   if all(mk in arns for mk in enabled):
     logger.info("All %d profiles exist for %s", len(arns), email)
-    _write_mapping(arns, email)
-    return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
+    _write_mapping(arns, email, groups)
+    return {"statusCode":200,"body":json.dumps({"profile_arns":arns,"groups":groups})}
   for mk in enabled:
     if mk in arns: continue
     pname = _profile_name(email, mk)
@@ -92,6 +127,6 @@ def handler(event, context):
       logger.info("Created '%s': %s", mk, arns[mk])
     except ClientError as e: logger.warning("Could not create profile for '%s': %s", mk, e)
     except Exception as e: logger.warning("Unexpected error for '%s': %s", mk, e)
-  _write_mapping(arns, email)
+  _write_mapping(arns, email, groups)
   logger.info("Returning %d ARN(s) for %s", len(arns), email)
-  return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
+  return {"statusCode":200,"body":json.dumps({"profile_arns":arns,"groups":groups})}
