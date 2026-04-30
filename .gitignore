@@ -5,6 +5,11 @@ dist/
 build/
 *.egg-info/
 *.spec
+*.zip
+pyi_rth_*.py
+
+# Runtime outputs / API responses
+provisioner-response.json
 
 # Python cache
 __pycache__/
