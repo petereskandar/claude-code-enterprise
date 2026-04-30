@@ -600,10 +600,10 @@ def get_profile_description(model_key: str, profile_key: str) -> str:
 # =============================================================================
 
 INFERENCE_PROFILE_MODELS: dict[str, dict] = {
-    "opus-4-6": {
+    "opus-4-7": {
         # Cross-region inference profile ID — {geo} is replaced at runtime with 'us' or 'eu'
-        "cross_region_profile_id": "{geo}.anthropic.claude-opus-4-6-v1",
-        "display_name": "Claude Opus 4.6",
+        "cross_region_profile_id": "{geo}.anthropic.claude-opus-4-7",
+        "display_name": "Claude Opus 4.7",
         "description": "Most capable model — complex reasoning and analysis",
         "enabled": True,
     },
