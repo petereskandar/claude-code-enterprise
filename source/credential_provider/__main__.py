@@ -876,20 +876,36 @@ class MultiProviderAuth:
 
         # Setup callback server
         auth_result = {"code": None, "error": None}
-        server = HTTPServer(("127.0.0.1", self.redirect_port), self._create_callback_handler(state, auth_result))
+        handler_class = self._create_callback_handler(state, auth_result)
 
-        # Start server in background
-        server_thread = threading.Thread(target=server.handle_request)
-        server_thread.daemon = True
-        server_thread.start()
+        # On Windows, 'localhost' may resolve to ::1 (IPv6) or 127.0.0.1 (IPv4)
+        # depending on the browser and system configuration. Listen on BOTH loopback
+        # addresses simultaneously so the callback succeeds regardless of which is used.
+        _cb_started = 0
+        for _family, _host in [(socket.AF_INET6, "::1"), (socket.AF_INET, "127.0.0.1")]:
+            try:
+                _cls = type("_CbSrv", (HTTPServer,), {"address_family": _family})
+                _srv = _cls((_host, self.redirect_port), handler_class)
+                threading.Thread(target=_srv.handle_request, daemon=True).start()
+                _cb_started += 1
+                self._debug_print(f"Callback server listening on [{_host}]:{self.redirect_port}")
+            except OSError as _e:
+                self._debug_print(f"Callback server [{_host}]:{self.redirect_port} unavailable: {_e}")
+
+        if _cb_started == 0:
+            raise Exception(f"Cannot start callback server on port {self.redirect_port}")
 
         # Open browser
         self._debug_print(f"Opening browser for {self.provider_config['name']} authentication...")
         self._debug_print(f"If browser doesn't open, visit: {auth_url}")
         webbrowser.open(auth_url)
 
-        # Wait for callback
-        server_thread.join(timeout=300)  # 5 minute timeout
+        # Poll for callback result (5-minute timeout, 200 ms resolution)
+        _deadline = time.monotonic() + 300
+        while time.monotonic() < _deadline:
+            if auth_result["code"] or auth_result["error"]:
+                break
+            time.sleep(0.2)
 
         if auth_result["error"]:
             raise Exception(f"Authentication error: {auth_result['error']}")
@@ -1094,6 +1110,25 @@ class MultiProviderAuth:
             # Extract credentials
             creds = response["Credentials"]
 
+            # Self-assume the role with UserEmail session tag for ABAC
+            email = token_claims.get("email", "").strip().lower()
+            if email:
+                self._debug_print(f"Performing self-assume on {federated_role_arn} with UserEmail={email}")
+                sts_tagged = boto3.client(
+                    "sts",
+                    region_name=self.config["aws_region"],
+                    aws_access_key_id=creds["AccessKeyId"],
+                    aws_secret_access_key=creds["SecretAccessKey"],
+                    aws_session_token=creds["SessionToken"],
+                )
+                assume_tagged = sts_tagged.assume_role(
+                    RoleArn=federated_role_arn,
+                    RoleSessionName="claude-code-session",
+                    Tags=[{"Key": "UserEmail", "Value": email}],
+                )
+                creds = assume_tagged["Credentials"]
+                self._debug_print(f"Self-assume successful, new expiration: {creds['Expiration']}")
+
             # Format for AWS CLI
             formatted_creds = {
                 "Version": 1,
@@ -1159,10 +1194,6 @@ class MultiProviderAuth:
                 "cognito-identity", region_name=self.config["aws_region"], config=Config(signature_version=UNSIGNED)
             )
             self._debug_print("Cognito client created")
-
-            self._debug_print("Creating STS client...")
-            boto3.client("sts", region_name=self.config["aws_region"])
-            self._debug_print("STS client created")
         finally:
             # Restore environment variables
             for var, value in saved_env.items():
@@ -1221,34 +1252,88 @@ class MultiProviderAuth:
             self._debug_print(f"Configured role ARN: {role_arn if role_arn else 'None (using default pool role)'}")
 
             if role_arn:
-                # Get credentials for identity first to get the OIDC token
                 credentials_response = cognito_client.get_credentials_for_identity(
                     IdentityId=identity_id, Logins={login_key: id_token}
                 )
-
-                # The credentials from Cognito are temporary credentials for the default role
-                # Since we want to use our specific role with session tags, we need to do AssumeRole
                 creds = credentials_response["Credentials"]
             else:
-                # Get default role from identity pool
                 credentials_response = cognito_client.get_credentials_for_identity(
                     IdentityId=identity_id, Logins={login_key: id_token}
                 )
-
                 creds = credentials_response["Credentials"]
 
-            # Format for AWS CLI
-            formatted_creds = {
-                "Version": 1,
-                "AccessKeyId": creds["AccessKeyId"],
-                "SecretAccessKey": creds["SecretKey"],
-                "SessionToken": creds["SessionToken"],
-                "Expiration": (
-                    creds["Expiration"].isoformat()
-                    if hasattr(creds["Expiration"], "isoformat")
-                    else creds["Expiration"]
-                ),
-            }
+            # Self-assume the role with UserEmail session tag for ABAC
+            email = token_claims.get("email", "").strip().lower()
+            target_role = role_arn or self.config.get("federated_role_arn", "")
+            if email and not target_role:
+                # federated_role_arn not in config (e.g. built without CloudFormation access).
+                # Derive role ARN from the Cognito credentials via GetCallerIdentity.
+                saved_profile = os.environ.pop("AWS_PROFILE", None)
+                try:
+                    _sts_derive = boto3.client(
+                        "sts",
+                        region_name=self.config["aws_region"],
+                        aws_access_key_id=creds["AccessKeyId"],
+                        aws_secret_access_key=creds["SecretKey"],
+                        aws_session_token=creds["SessionToken"],
+                    )
+                    _identity = _sts_derive.get_caller_identity()
+                    _arn = _identity.get("Arn", "")
+                    if "assumed-role/" in _arn:
+                        _role_part = _arn.split("assumed-role/")[1].split("/")[0]
+                        _account = _identity.get("Account", "")
+                        target_role = f"arn:aws:iam::{_account}:role/{_role_part}"
+                        self._debug_print(f"Derived federated role ARN from GetCallerIdentity: {target_role}")
+                except Exception as _e:
+                    self._debug_print(f"Could not derive role ARN via GetCallerIdentity: {_e}")
+                finally:
+                    if saved_profile:
+                        os.environ["AWS_PROFILE"] = saved_profile
+            if email and target_role:
+                self._debug_print(f"Performing self-assume on {target_role} with UserEmail={email}")
+                saved_profile = os.environ.pop("AWS_PROFILE", None)
+                try:
+                    sts_client = boto3.client(
+                        "sts",
+                        region_name=self.config["aws_region"],
+                        aws_access_key_id=creds["AccessKeyId"],
+                        aws_secret_access_key=creds["SecretKey"],
+                        aws_session_token=creds["SessionToken"],
+                    )
+                    assume_response = sts_client.assume_role(
+                        RoleArn=target_role,
+                        RoleSessionName="claude-code-session",
+                        Tags=[{"Key": "UserEmail", "Value": email}],
+                    )
+                finally:
+                    if saved_profile:
+                        os.environ["AWS_PROFILE"] = saved_profile
+                assumed_creds = assume_response["Credentials"]
+                self._debug_print(f"Self-assume successful, new expiration: {assumed_creds['Expiration']}")
+                formatted_creds = {
+                    "Version": 1,
+                    "AccessKeyId": assumed_creds["AccessKeyId"],
+                    "SecretAccessKey": assumed_creds["SecretAccessKey"],
+                    "SessionToken": assumed_creds["SessionToken"],
+                    "Expiration": (
+                        assumed_creds["Expiration"].isoformat()
+                        if hasattr(assumed_creds["Expiration"], "isoformat")
+                        else assumed_creds["Expiration"]
+                    ),
+                }
+            else:
+                self._debug_print("No email or role ARN for self-assume, returning Cognito creds directly")
+                formatted_creds = {
+                    "Version": 1,
+                    "AccessKeyId": creds["AccessKeyId"],
+                    "SecretAccessKey": creds["SecretKey"],
+                    "SessionToken": creds["SessionToken"],
+                    "Expiration": (
+                        creds["Expiration"].isoformat()
+                        if hasattr(creds["Expiration"], "isoformat")
+                        else creds["Expiration"]
+                    ),
+                }
 
             return formatted_creds
 
@@ -1513,7 +1598,7 @@ class MultiProviderAuth:
             )
 
             if response.status_code == 200:
-                result = response.json()
+                result = response.json() or {"allowed": True, "reason": "empty_response"}
                 self._debug_print(f"Quota check result: allowed={result.get('allowed')}, reason={result.get('reason')}")
                 return result
             elif response.status_code == 401:
@@ -1828,6 +1913,8 @@ class MultiProviderAuth:
         Args:
             quota_result: Result from quota check API
         """
+        if not quota_result:
+            return
         usage = quota_result.get("usage", {})
         monthly_percent = usage.get("monthly_percent", 0)
         daily_percent = usage.get("daily_percent", 0)
@@ -1966,45 +2053,57 @@ class MultiProviderAuth:
         region = self.config.get("aws_region", "us-east-1")
         self._debug_print(f"Invoking inference profile provisioner Lambda: {provisioner_arn}")
 
-        try:
-            lambda_client = boto3.client(
-                "lambda",
-                region_name=region,
-                aws_access_key_id=aws_credentials["AccessKeyId"],
-                aws_secret_access_key=aws_credentials["SecretAccessKey"],
-                aws_session_token=aws_credentials["SessionToken"],
-            )
-            payload = json.dumps({"email": email, "claims": token_claims}).encode()
-            response = lambda_client.invoke(
-                FunctionName=provisioner_arn,
-                InvocationType="RequestResponse",
-                Payload=payload,
-            )
-            payload = json.loads(response["Payload"].read())
+        # Retry up to 3 times — Lambda cold starts can cause transient failures
+        # on first install.
+        last_exc: Exception | None = None
+        for _attempt in range(3):
+            if _attempt:
+                import time as _time
+                _time.sleep(2 * _attempt)  # 0 s, 2 s, 4 s
+            try:
+                lambda_client = boto3.client(
+                    "lambda",
+                    region_name=region,
+                    aws_access_key_id=aws_credentials["AccessKeyId"],
+                    aws_secret_access_key=aws_credentials["SecretAccessKey"],
+                    aws_session_token=aws_credentials["SessionToken"],
+                )
+                payload = json.dumps({"email": email, "claims": token_claims}).encode()
+                response = lambda_client.invoke(
+                    FunctionName=provisioner_arn,
+                    InvocationType="RequestResponse",
+                    Payload=payload,
+                )
+                payload = json.loads(response["Payload"].read())
 
-            if response.get("FunctionError"):
-                self._debug_print(f"Provisioner Lambda returned function error: {payload}")
-                return cached_arns
+                if response.get("FunctionError"):
+                    self._debug_print(f"Provisioner Lambda returned function error (attempt {_attempt+1}): {payload}")
+                    last_exc = RuntimeError(f"Lambda function error: {payload}")
+                    continue  # retry
 
-            # Unwrap API Gateway envelope when present
-            if "body" in payload:
-                body = json.loads(payload["body"]) if isinstance(payload["body"], str) else payload["body"]
-            else:
-                body = payload
+                # Unwrap API Gateway envelope when present
+                if "body" in payload:
+                    body = json.loads(payload["body"]) if isinstance(payload["body"], str) else payload["body"]
+                else:
+                    body = payload
 
-            profile_arns = body.get("profile_arns", {})
-            if not profile_arns:
-                self._debug_print("Provisioner Lambda returned no profile ARNs")
-                return cached_arns
+                profile_arns = body.get("profile_arns", {})
+                if not profile_arns:
+                    self._debug_print(f"Provisioner Lambda returned no profile ARNs (attempt {_attempt+1})")
+                    last_exc = RuntimeError("Lambda returned no profile ARNs")
+                    continue  # retry
 
-            result_arns = {**cached_arns, **profile_arns}
-            self._save_inference_profiles_cache(result_arns)
-            self._debug_print(f"Provisioner returned {len(profile_arns)} ARN(s)")
-            return result_arns
+                result_arns = {**cached_arns, **profile_arns}
+                self._save_inference_profiles_cache(result_arns)
+                self._debug_print(f"Provisioner returned {len(profile_arns)} ARN(s)")
+                return result_arns
 
-        except Exception as e:
-            self._debug_print(f"Provisioner Lambda invocation failed (non-fatal): {e}")
-            return cached_arns
+            except Exception as e:
+                self._debug_print(f"Provisioner Lambda invocation failed (attempt {_attempt+1}): {e}")
+                last_exc = e
+
+        self._debug_print(f"All Lambda retries exhausted: {last_exc}")
+        return cached_arns
 
     def _patch_claude_json(self, profile_arns: dict[str, str]) -> None:
         """Write the default inference profile ARN into ~/.claude.json.
@@ -2064,7 +2163,7 @@ class MultiProviderAuth:
 
         Args:
             profile_arns: Dict mapping model_key → application inference profile ARN.
-                          Expected keys: "opus-4-6", "sonnet-4-6", "haiku-4-5".
+                          Expected keys: "opus-4-7", "sonnet-4-6", "haiku-4-5".
         """
         try:
             from claude_code_with_bedrock.models import DEFAULT_INFERENCE_PROFILE_MODEL
@@ -2079,7 +2178,7 @@ class MultiProviderAuth:
         model_env_mapping = {
             "ANTHROPIC_MODEL": profile_arns.get(default_model),
             "ANTHROPIC_SMALL_FAST_MODEL": profile_arns.get("haiku-4-5"),
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": profile_arns.get("opus-4-6"),
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": profile_arns.get("opus-4-7"),
             "ANTHROPIC_DEFAULT_SONNET_MODEL": profile_arns.get("sonnet-4-6"),
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": profile_arns.get("haiku-4-5"),
         }
@@ -2101,6 +2200,14 @@ class MultiProviderAuth:
         for env_var, arn in model_env_mapping.items():
             if arn and env.get(env_var) != arn:
                 env[env_var] = arn
+                updated = True
+
+        # Also set awsAuthRefresh to this binary so Claude Code can refresh credentials.
+        # Only do this when running as a frozen binary (installed package, not dev mode).
+        if getattr(sys, "frozen", False):
+            expected_refresh = f"{sys.executable} --profile {self.profile}"
+            if settings.get("awsAuthRefresh") != expected_refresh:
+                settings["awsAuthRefresh"] = expected_refresh
                 updated = True
 
         if not updated:
@@ -2144,6 +2251,152 @@ class MultiProviderAuth:
 
         self._debug_print("settings.json has generic model ID — patching with inference profile ARNs")
         self._patch_settings_json(profile_arns)
+
+    def _patch_claude_desktop_config(self, profile_arns: dict[str, str]) -> None:
+        """Update %LOCALAPPDATA%\\Claude-3p\\claude_desktop_config.json with application inference profile ARNs.
+
+        Claude Desktop resolved the generic aliases (opus, sonnet, haiku, opusplan) to
+        system cross-region inference profiles, which are blocked by our ABAC IAM policy.
+        By replacing inferenceModels with the per-user application inference profile ARNs
+        (created by Lambda and tagged with user.email) we route all Cowork model calls
+        through the profiles that the policy explicitly allows.
+
+        Only runs on Windows.  Safe to call multiple times — skips if already correct.
+
+        Args:
+            profile_arns: Dict mapping model_key → application inference profile ARN.
+                          Expected keys: "opus-4-7", "sonnet-4-6", "haiku-4-5".
+        """
+        import platform
+        if platform.system() != "Windows":
+            self._debug_print("_patch_claude_desktop_config: not Windows, skipping")
+            return
+
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if not local_app_data:
+            self._debug_print("_patch_claude_desktop_config: LOCALAPPDATA not set, skipping")
+            return
+
+        config_path = Path(local_app_data) / "Claude-3p" / "claude_desktop_config.json"
+
+        opus_arn = profile_arns.get("opus-4-7", "")
+        sonnet_arn = profile_arns.get("sonnet-4-6", "")
+        haiku_arn = profile_arns.get("haiku-4-5", "")
+
+        if not all([opus_arn, sonnet_arn, haiku_arn]):
+            self._debug_print("_patch_claude_desktop_config: missing ARNs, skipping")
+            return
+
+        # inferenceModels: [opus, sonnet, haiku, opusplan(=opus for extended thinking)]
+        new_models = [opus_arn, sonnet_arn, haiku_arn, opus_arn]
+
+        if not config_path.exists():
+            if not getattr(sys, "frozen", False):
+                self._debug_print(f"_patch_claude_desktop_config: {config_path} not found, skipping (not frozen)")
+                return
+            # Running as installed binary on a fresh machine — create the enterprise config from scratch.
+            # The credential-helper-<profile>.bat is in the same directory as the exe.
+            install_dir = Path(sys.executable).parent
+            helper_bat = install_dir / f"credential-helper-{self.profile}.bat"
+            region = self.config.get("aws_region", "us-east-1")
+            data = {
+                "enterpriseConfig": {
+                    "inferenceProvider": "bedrock",
+                    "inferenceBedrockRegion": region,
+                    "inferenceCredentialHelper": str(helper_bat),
+                    "inferenceCredentialHelperTtlSec": 3600,
+                    "inferenceModels": new_models,
+                    "isClaudeCodeForDesktopEnabled": True,
+                    "isDesktopExtensionEnabled": True,
+                    "isDesktopExtensionDirectoryEnabled": True,
+                    "isDesktopExtensionSignatureRequired": True,
+                    "isLocalDevMcpEnabled": True,
+                }
+            }
+            try:
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                import tempfile
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, prefix=".claude_desktop_config.tmp")
+                try:
+                    with os.fdopen(tmp_fd, "w", encoding="ascii") as f:
+                        json.dump(data, f, indent=2)
+                    os.replace(tmp_path, config_path)
+                except Exception:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
+                self._debug_print(f"_patch_claude_desktop_config: created {config_path}")
+                print("  Claude Desktop / Cowork enterprise config created.", file=sys.stderr)
+            except Exception as e:
+                self._debug_print(f"_patch_claude_desktop_config: could not create {config_path}: {e}")
+            return
+
+        try:
+            with open(config_path, encoding="ascii") as f:
+                data = json.load(f)
+        except Exception as e:
+            self._debug_print(f"_patch_claude_desktop_config: could not read {config_path}: {e}")
+            return
+
+        enterprise = data.setdefault("enterpriseConfig", {})
+        if enterprise.get("inferenceModels") == new_models:
+            self._debug_print("_patch_claude_desktop_config: already correct, skipping")
+            return
+
+        enterprise["inferenceModels"] = new_models
+
+        try:
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, prefix=".claude_desktop_config.tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="ascii") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp_path, config_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            self._debug_print(
+                f"_patch_claude_desktop_config: updated {config_path} with application inference profile ARNs"
+            )
+            print("  Claude Desktop / Cowork inferenceModels updated with application inference profiles.",
+                  file=sys.stderr)
+        except Exception as e:
+            self._debug_print(f"_patch_claude_desktop_config: could not write {config_path}: {e}")
+
+    def _read_profile_arns_from_settings(self) -> dict[str, str]:
+        """Read application inference profile ARNs from ~/.claude/settings.json.
+
+        Returns a profile_arns dict (same format as _ensure_user_inference_profiles)
+        by reversing the env-var mapping, or an empty dict if not available.
+        """
+        settings_path = Path.home() / ".claude" / "settings.json"
+        if not settings_path.exists():
+            return {}
+        try:
+            with open(settings_path) as f:
+                settings = json.load(f)
+        except Exception:
+            return {}
+        env = settings.get("env", {})
+        opus_arn = env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", "")
+        sonnet_arn = env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "")
+        haiku_arn = env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+        # Only return if all three are application inference profile ARNs
+        if all(
+            arn and "application-inference-profile" in arn
+            for arn in [opus_arn, sonnet_arn, haiku_arn]
+        ):
+            return {
+                "opus-4-7": opus_arn,
+                "sonnet-4-6": sonnet_arn,
+                "haiku-4-5": haiku_arn,
+            }
+        return {}
 
     def run(self):
         """Main execution flow"""
@@ -2226,13 +2479,13 @@ class MultiProviderAuth:
             # Check quota before issuing credentials (if configured)
             if self._should_check_quota():
                 self._debug_print("Checking quota before credential issuance...")
-                quota_result = self._check_quota(token_claims, id_token)
-                self._save_quota_check_timestamp()  # Track when quota was checked
-                if not quota_result.get("allowed", True):
-                    return self._handle_quota_blocked(quota_result)
-                else:
-                    # Check for warning threshold (allowed but high usage)
-                    self._handle_quota_warning(quota_result)
+                try:
+                    quota_result = self._check_quota(token_claims, id_token)
+                    self._save_quota_check_timestamp()
+                    if quota_result and not quota_result.get("allowed", True):
+                        return self._handle_quota_blocked(quota_result)
+                except Exception as qe:
+                    self._debug_print(f"Quota check failed (non-blocking): {qe}")
 
             # Get AWS credentials
             self._debug_print("Exchanging token for AWS credentials...")
@@ -2331,6 +2584,14 @@ def main():
         action="store_true",
         help="Create per-user Bedrock inference profiles and update ~/.claude/settings.json (run during install)",
     )
+    parser.add_argument(
+        "--credential-helper",
+        action="store_true",
+        help=(
+            "Output a Claude Desktop / Cowork bearer token to stdout. "
+            "Used as the inferenceCredentialHelper executable in MDM/registry config."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -2422,6 +2683,59 @@ def main():
             sys.exit(0)
         # Credentials expired, fall through to normal auth flow
 
+    # Handle --credential-helper: output Bedrock bearer token for Claude Desktop / Cowork.
+    # Claude Desktop calls the inferenceCredentialHelper with no arguments and
+    # expects {"token": "bedrock-api-key-<base64>"} on stdout.
+    if args.credential_helper:
+        try:
+            import base64
+
+            from botocore.auth import SigV4QueryAuth
+            from botocore.awsrequest import AWSRequest
+            from botocore.credentials import Credentials as _BotocoreCredentials
+
+            # Use cached creds; re-authenticate silently if they've expired
+            credentials = auth.get_cached_credentials()
+            if not credentials:
+                id_token, token_claims = auth.authenticate_oidc()
+                credentials = auth.get_aws_credentials(id_token, token_claims)
+                auth.save_credentials(credentials)
+
+            region = auth.config.get("aws_region", "us-east-1")
+            creds_obj = _BotocoreCredentials(
+                credentials["AccessKeyId"],
+                credentials["SecretAccessKey"],
+                credentials["SessionToken"],
+            )
+            # Build a SigV4 presigned request for the Bedrock bearer-token endpoint.
+            # Claude Desktop converts this into its internal "bedrock-api-key-..." format.
+            request = AWSRequest(
+                method="POST",
+                url="https://bedrock.amazonaws.com/",
+                headers={"host": "bedrock.amazonaws.com"},
+                params={"Action": "CallWithBearerToken"},
+            )
+            # 43200 seconds = 12 h TTL — matches CoWork's inferenceCredentialHelperTtlSec
+            SigV4QueryAuth(creds_obj, "bedrock", region, expires=43200).add_auth(request)
+            presigned = request.url.replace("https://", "") + "&Version=1"
+            token = "bedrock-api-key-" + base64.b64encode(presigned.encode()).decode()
+
+            # Lazy-patch claude_desktop_config.json if it still uses generic aliases.
+            # This handles users who authenticated via CLI first and then open Claude Desktop.
+            if auth.config.get("inference_profiles_enabled", False):
+                try:
+                    profile_arns_from_settings = auth._read_profile_arns_from_settings()
+                    if profile_arns_from_settings:
+                        auth._patch_claude_desktop_config(profile_arns_from_settings)
+                except Exception:
+                    pass  # Never fail credential-helper due to config patching
+
+            print(json.dumps({"token": token}))
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"error": str(e)}), file=sys.stderr)
+            sys.exit(1)
+
     # Handle --setup-profiles: create inference profiles and patch settings.json
     if args.setup_profiles:
         if not auth.config.get("inference_profiles_enabled", False):
@@ -2447,6 +2761,11 @@ def main():
             # Also patch ~/.claude.json for backward compat
             auth._patch_claude_json(profile_arns)
 
+            # Patch %LOCALAPPDATA%\Claude-3p\claude_desktop_config.json so
+            # Claude Desktop / Cowork uses application inference profiles (ABAC)
+            # instead of the generic system cross-region inference profiles.
+            auth._patch_claude_desktop_config(profile_arns)
+
             # Cache credentials for subsequent use
             auth.save_credentials(credentials)
 
@@ -2457,6 +2776,7 @@ def main():
             for model_key, arn in sorted(profile_arns.items()):
                 print(f"  {model_key}: {arn}", file=sys.stderr)
             print("\nAll 5 model env vars updated in ~/.claude/settings.json", file=sys.stderr)
+            print("Claude Desktop / Cowork inferenceModels updated.", file=sys.stderr)
             sys.exit(0)
 
         except Exception as e:
