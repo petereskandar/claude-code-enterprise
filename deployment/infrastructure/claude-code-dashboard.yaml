@@ -271,6 +271,15 @@ Resources:
             - Fn::GetAtt:
               - MetricsTable
               - Arn
+      - PolicyName: SSMPricingRead
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ssm:GetParameter
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/claude-code/${DashboardName}/model-pricing
   MetricsAggregatorFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -292,9 +301,14 @@ Resources:
             Ref: MetricsRegion
           METRICS_TABLE:
             Ref: MetricsTable
+          QUOTA_TABLE: UserQuotaMetrics
+          POLICIES_TABLE: QuotaPolicies
+          PRICING_PARAM_NAME:
+            Fn::Sub: /claude-code/${DashboardName}/model-pricing
+          ENABLE_FINEGRAINED_QUOTAS: 'true'
       Code:
         S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
-        S3Key: 7eb39bb03c622cc6250b96d4fbce8b06
+        S3Key: claude-code/aggregator/index-v3.zip
   MetricsAggregatorScheduleRule:
     Type: AWS::Events::Rule
     Properties:
@@ -396,7 +410,7 @@ Resources:
             Ref: InferenceProfileMappingTable
       Code:
         S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
-        S3Key: 95f632872e4253a0ba38d70df3845516
+        S3Key: claude-code/bridge/index.zip
   BedrockMetricsBridgeScheduleRule:
     Type: AWS::Events::Rule
     Condition: UseInferenceProfiles
