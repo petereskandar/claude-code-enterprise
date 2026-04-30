@@ -37,7 +37,7 @@ def _display_table_format(console: Console, profile, identity_pool_id: str | Non
 
     # Configuration and AWS profile names
     config_table.add_row("Configuration Profile", profile.name)
-    config_table.add_row("AWS Profile", "claude-code-default")
+    config_table.add_row("AWS Profile", profile.name)
 
     # Provider information
     config_table.add_row("OIDC Provider", profile.provider_domain)
@@ -99,7 +99,7 @@ def _display_simple_format(console: Console, profile, identity_pool_id: str | No
 
     # Configuration and AWS profile names
     console.print(f"  Configuration Profile: [cyan]{profile.name}[/cyan]")
-    console.print("  AWS Profile: [cyan]claude-code-default[/cyan]")
+    console.print(f"  AWS Profile: [cyan]{profile.name}[/cyan]")
 
     # Provider information
     console.print(f"  OIDC Provider: [cyan]{profile.provider_domain}[/cyan]")
