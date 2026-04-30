@@ -110,11 +110,14 @@ class PackageCommand(Command):
             # Use the selected platforms (guaranteed to have at least one due to validation)
             target_platform = selected_platforms if len(selected_platforms) > 1 else selected_platforms[0]
 
-        # Prompt for co-authorship preference (default to No - opt-in approach)
-        include_coauthored_by = questionary.confirm(
-            "Include 'Co-Authored-By: Claude' in git commits?",
-            default=False,
-        ).ask()
+        # Prompt for co-authorship preference - use profile setting in non-interactive mode
+        if self.io.is_interactive():
+            include_coauthored_by = questionary.confirm(
+                "Include 'Co-Authored-By: Claude' in git commits?",
+                default=getattr(profile, "include_coauthored_by", False),
+            ).ask()
+        else:
+            include_coauthored_by = getattr(profile, "include_coauthored_by", False)
 
         # Validate platform
         valid_platforms = [
@@ -155,8 +158,19 @@ class PackageCommand(Command):
         )
 
         if not stack_outputs:
-            console.print("[red]Could not fetch stack outputs. Is the stack deployed?[/red]")
-            return 1
+            # Fall back to cached values in the profile when CloudFormation is unreachable
+            if profile.federation_type == "direct" and profile.federated_role_arn:
+                console.print("[yellow]CloudFormation unavailable - using cached role ARN from profile config[/yellow]")
+                stack_outputs = {"FederationType": "direct", "DirectSTSRoleArn": profile.federated_role_arn}
+            elif profile.federation_type == "cognito" and getattr(profile, "identity_pool_id", None):
+                console.print("[yellow]CloudFormation unavailable - using cached identity pool ID from profile config[/yellow]")
+                stack_outputs = {"FederationType": "cognito", "IdentityPoolId": profile.identity_pool_id}
+                # Also carry the federated_role_arn if it is stored in the profile
+                if getattr(profile, "federated_role_arn", None):
+                    stack_outputs["FederatedRoleArn"] = profile.federated_role_arn
+            else:
+                console.print("[red]Could not fetch stack outputs. Is the stack deployed?[/red]")
+                return 1
 
         # Check federation type and get appropriate identifier
         federation_type = stack_outputs.get("FederationType", profile.federation_type)
@@ -177,6 +191,8 @@ class PackageCommand(Command):
             if not identity_pool_id:
                 console.print("[red]Identity Pool ID not found in stack outputs.[/red]")
                 return 1
+            # Capture FederatedRoleArn for Cognito federation (used for self-assume ABAC)
+            federated_role_arn = stack_outputs.get("FederatedRoleArn")
 
         # Welcome
         console.print(
@@ -365,7 +381,7 @@ class PackageCommand(Command):
 
         # Create installer
         console.print("[cyan]Creating installer script...[/cyan]")
-        self._create_installer(output_dir, profile, built_executables, built_otel_helpers)
+        self._create_installer(output_dir, profile, built_executables, built_otel_helpers, profile_name=profile_name)
 
         # Copy shell wrapper for OTEL helper (Layer 2 caching - avoids PyInstaller startup)
         if built_otel_helpers:
@@ -380,11 +396,16 @@ class PackageCommand(Command):
 
         # Create documentation
         console.print("[cyan]Creating documentation...[/cyan]")
-        self._create_documentation(output_dir, profile, timestamp)
+        self._create_documentation(output_dir, profile, timestamp, profile_name)
 
         # Always create Claude Code settings (required for Bedrock configuration)
         console.print("[cyan]Creating Claude Code settings...[/cyan]")
         self._create_claude_settings(output_dir, profile, include_coauthored_by, profile_name)
+
+        # Generate CoWork 3P MDM configuration files
+        if profile.cowork_3p_enabled:
+            console.print("[cyan]Generating CoWork 3P MDM configurations...[/cyan]")
+            self._generate_cowork_3p_mdm_config(output_dir, profile, profile_name)
 
         # Summary
         console.print("\n[green]✓ Package created successfully![/green]")
@@ -406,6 +427,60 @@ class PackageCommand(Command):
             console.print("  • claude-settings/settings.json - Claude Code telemetry settings")
             for platform_name, otel_helper_path in built_otel_helpers:
                 console.print(f"  • {otel_helper_path.name} - OTEL helper executable for {platform_name}")
+        if profile.cowork_3p_enabled:
+            if (output_dir / "cowork-3p-config.json").exists():
+                console.print("  • cowork-3p-config.json - CoWork 3P MDM configuration (JSON)")
+            if (output_dir / "cowork-3p.mobileconfig").exists():
+                console.print("  • cowork-3p.mobileconfig - CoWork 3P MDM profile (macOS)")
+            if (output_dir / "cowork-3p.reg").exists():
+                console.print("  • cowork-3p.reg - CoWork 3P registry file (Windows MDM/GPO)")
+            if (output_dir / "claude_desktop_config.json").exists():
+                console.print("  • claude_desktop_config.json - Claude Desktop enterprise config (Windows local)")
+
+        # -----------------------------------------------------------------------
+        # Cleanup: remove files that do not belong to the target platform(s)
+        # and strip the PyInstaller work directory (never needed by end users).
+        # -----------------------------------------------------------------------
+        import shutil as _shutil
+
+        is_windows_only = all(p == "windows" for p in platforms_to_build)
+        is_linux_only   = all(p.startswith("linux") for p in platforms_to_build)
+        is_macos_only   = all(p.startswith("macos") for p in platforms_to_build)
+
+        def _remove(path: Path) -> None:
+            if path.exists():
+                if path.is_dir():
+                    _shutil.rmtree(path)
+                else:
+                    path.unlink()
+
+        # Always remove the PyInstaller work directory (build artefact)
+        _remove(output_dir / "_pyinstaller_work")
+
+        if is_windows_only:
+            # Windows packages don't need the Unix install script or macOS MDM profile
+            _remove(output_dir / "install.sh")
+            _remove(output_dir / "cowork-3p.mobileconfig")
+        elif is_linux_only:
+            # Linux packages don't need Windows installer, helpers, or macOS/Windows MDM files
+            _remove(output_dir / "install.bat")
+            _remove(output_dir / "cowork-3p.mobileconfig")
+            _remove(output_dir / "cowork-3p.reg")
+            _remove(output_dir / "claude_desktop_config.json")
+            for bat in output_dir.glob("credential-helper-*.bat"):
+                _remove(bat)
+            # Remove any Windows EXEs that may have been built cross-platform
+            for exe in output_dir.glob("credential-process-windows*.exe"):
+                _remove(exe)
+        elif is_macos_only:
+            # macOS packages don't need Windows installer or registry files
+            _remove(output_dir / "install.bat")
+            _remove(output_dir / "cowork-3p.reg")
+            _remove(output_dir / "claude_desktop_config.json")
+            for bat in output_dir.glob("credential-helper-*.bat"):
+                _remove(bat)
+            for exe in output_dir.glob("credential-process-windows*.exe"):
+                _remove(exe)
 
         # Next steps
         console.print("\n[bold]Distribution steps:[/bold]")
@@ -511,11 +586,11 @@ class PackageCommand(Command):
         current_system = platform.system().lower()
         current_machine = platform.machine().lower()
 
-        # Windows builds use Nuitka via CodeBuild
+        # Windows builds use PyInstaller with the project spec file
         if target_platform == "windows":
             if current_system == "windows":
-                # Native Windows build with Nuitka
-                return self._build_native_executable_nuitka(output_dir, "windows")
+                # Native Windows build with PyInstaller
+                return self._build_windows_pyinstaller(output_dir)
             else:
                 # Use CodeBuild for Windows builds on non-Windows platforms
                 # Don't return - just start the build and continue
@@ -877,6 +952,7 @@ class PackageCommand(Command):
                 "--hidden-import=keyring.backends.SecretService",
                 "--hidden-import=keyring.backends.Windows",
                 "--hidden-import=keyring.backends.chainer",
+                "--hidden-import=claude_code_with_bedrock.models",
                 str(src_file),
             ]
         else:
@@ -899,6 +975,7 @@ class PackageCommand(Command):
                 "--hidden-import=keyring.backends.SecretService",
                 "--hidden-import=keyring.backends.Windows",
                 "--hidden-import=keyring.backends.chainer",
+                "--hidden-import=claude_code_with_bedrock.models",
                 str(src_file),
             ]
 
@@ -917,6 +994,74 @@ class PackageCommand(Command):
             return binary_path
         else:
             raise RuntimeError(f"Binary not created: {binary_path}")
+
+    def _build_windows_pyinstaller(self, output_dir: Path) -> Path:
+        """Build Windows executable using PyInstaller with the project spec file.
+
+        Uses credential-process-windows.spec (repo root) which bundles certifi,
+        all required hidden imports, and the pyi_rth_certifi.py runtime hook.
+        """
+        import sys
+
+        console = Console()
+        verbose = self.option("build-verbose")
+
+        binary_name = "credential-process-windows.exe"
+
+        # Repo root: package.py is at source/claude_code_with_bedrock/cli/commands/package.py
+        repo_root = Path(__file__).parent.parent.parent.parent.parent
+        spec_file = repo_root / "credential-process-windows.spec"
+        runtime_hook = repo_root / "pyi_rth_certifi.py"
+
+        if not spec_file.exists():
+            raise FileNotFoundError(
+                f"PyInstaller spec file not found: {spec_file}\n"
+                "Ensure credential-process-windows.spec exists at the repo root."
+            )
+        if not runtime_hook.exists():
+            raise FileNotFoundError(
+                f"Runtime hook not found: {runtime_hook}\n"
+                "Ensure pyi_rth_certifi.py exists at the repo root."
+            )
+
+        console.print("[yellow]Building Windows binary with PyInstaller spec file...[/yellow]")
+
+        log_level = "INFO" if verbose else "WARN"
+
+        # Prefer the venv pyinstaller.exe; fall back to the running Python's module
+        pyinstaller_exe = repo_root / ".venv" / "Scripts" / "pyinstaller.exe"
+        if pyinstaller_exe.exists():
+            cmd_prefix = [str(pyinstaller_exe)]
+        else:
+            cmd_prefix = [sys.executable, "-m", "PyInstaller"]
+
+        # Resolve to absolute path so --distpath is unambiguous regardless of
+        # which CWD subprocess.run uses (repo_root vs the ccwb process CWD).
+        abs_output_dir = output_dir.resolve()
+        work_dir = abs_output_dir / "_pyinstaller_work"
+        cmd = cmd_prefix + [
+            str(spec_file),
+            "--noconfirm",
+            f"--distpath={abs_output_dir}",
+            f"--workpath={work_dir}",
+            f"--log-level={log_level}",
+        ]
+
+        # Run from repo root so relative paths in the spec resolve correctly
+        result = subprocess.run(cmd, capture_output=not verbose, text=True, cwd=str(repo_root))
+        if result.returncode != 0:
+            console.print(f"[red]PyInstaller build failed:[/red]\n{result.stderr}")
+            raise RuntimeError(f"PyInstaller build failed: {result.stderr}")
+
+        binary_path = abs_output_dir / binary_name
+        if binary_path.exists():
+            console.print("[green]✓ Windows binary built successfully with PyInstaller[/green]")
+            return binary_path
+        else:
+            raise RuntimeError(
+                f"Binary not created at expected path: {binary_path}\n"
+                "Check PyInstaller output above for errors."
+            )
 
     def _build_linux_pyinstaller(self, output_dir: Path) -> Path:
         """Build Linux executable using PyInstaller."""
@@ -958,6 +1103,7 @@ class PackageCommand(Command):
             # Hidden imports for our dependencies
             "--hidden-import=keyring.backends.SecretService",
             "--hidden-import=keyring.backends.chainer",
+            "--hidden-import=claude_code_with_bedrock.models",
             "--hidden-import=six",
             "--hidden-import=six.moves",
             "--hidden-import=six.moves._thread",
@@ -1025,32 +1171,23 @@ class PackageCommand(Command):
             # Copy source files to temp directory
             source_dir = Path(__file__).parent.parent.parent.parent
             shutil.copytree(source_dir / "credential_provider", temp_path / "credential_provider")
+            shutil.copytree(source_dir / "claude_code_with_bedrock", temp_path / "claude_code_with_bedrock")
 
             # Create Dockerfile with PyInstaller
-            dockerfile_content = f"""FROM --platform={docker_platform} ubuntu:22.04
+            dockerfile_content = f"""FROM --platform={docker_platform} python:3.11-slim-bullseye
 
 # Set non-interactive to avoid tzdata prompts
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# Install Python 3.12 and build dependencies
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
-    software-properties-common \
     build-essential \
     binutils \
-    curl \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y python3.12 python3.12-dev python3.12-venv \
-    && python3.12 -m ensurepip \
-    && python3.12 -m pip install --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Python 3.12 as default python3
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
-
 # Install Python packages
-RUN python3 -m pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir --timeout 120 --retries 5 \
     pyinstaller==6.3.0 \
     boto3 \
     requests \
@@ -1071,6 +1208,7 @@ WORKDIR /build
 
 # Copy source code
 COPY credential_provider /build/credential_provider
+COPY claude_code_with_bedrock /build/claude_code_with_bedrock
 
 # Build the binary with PyInstaller
 RUN pyinstaller \
@@ -1084,6 +1222,7 @@ RUN pyinstaller \
     --log-level WARN \
     --hidden-import keyring.backends.SecretService \
     --hidden-import keyring.backends.chainer \
+    --hidden-import claude_code_with_bedrock.models \
     --hidden-import six \
     --hidden-import six.moves \
     --hidden-import six.moves._thread \
@@ -1119,7 +1258,6 @@ RUN pyinstaller \
                     "docker",
                     "buildx",
                     "build",
-                    "--no-cache",
                     "--platform",
                     docker_platform,
                     "-t",
@@ -1130,6 +1268,8 @@ RUN pyinstaller \
                 cwd=temp_path,
                 capture_output=not verbose,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
 
             if build_result.returncode != 0:
@@ -1145,6 +1285,8 @@ RUN pyinstaller \
                 ["docker", "create", "--name", container_name, image_tag],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
 
             if run_result.returncode != 0:
@@ -1253,7 +1395,6 @@ RUN mkdir -p /output && shiv \\
                     "docker",
                     "buildx",
                     "build",
-                    "--no-cache",
                     "--platform",
                     docker_platform,
                     "-t",
@@ -1274,6 +1415,8 @@ RUN mkdir -p /output && shiv \\
                 ["docker", "create", "--name", container_name, image_tag],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if run_result.returncode != 0:
                 raise RuntimeError(f"Failed to create container: {run_result.stderr}")
@@ -1342,30 +1485,20 @@ RUN mkdir -p /output && shiv \\
             shutil.copytree(source_dir / "otel_helper", temp_path / "otel_helper")
 
             # Create Dockerfile for OTEL helper with PyInstaller
-            dockerfile_content = f"""FROM --platform={docker_platform} ubuntu:22.04
+            dockerfile_content = f"""FROM --platform={docker_platform} python:3.11-slim-bullseye
 
 # Set non-interactive to avoid tzdata prompts
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# Install Python 3.12 and build dependencies
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
-    software-properties-common \
     build-essential \
     binutils \
-    curl \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y python3.12 python3.12-dev python3.12-venv \
-    && python3.12 -m ensurepip \
-    && python3.12 -m pip install --upgrade pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Python 3.12 as default python3
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
-
 # Install Python packages
-RUN python3 -m pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir --timeout 120 --retries 5 \
     pyinstaller==6.3.0 \
     PyJWT \
     cryptography \
@@ -1418,7 +1551,6 @@ RUN pyinstaller \
                     "docker",
                     "buildx",
                     "build",
-                    "--no-cache",
                     "--platform",
                     docker_platform,
                     "-t",
@@ -1444,6 +1576,8 @@ RUN pyinstaller \
                 ["docker", "create", "--name", container_name, image_tag],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
 
             if run_result.returncode != 0:
@@ -1579,7 +1713,7 @@ RUN pyinstaller \
 
             build_info_file = Path.home() / ".claude-code" / "latest-build.json"
             build_info_file.parent.mkdir(exist_ok=True)
-            with open(build_info_file, "w") as f:
+            with open(build_info_file, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "build_id": build_id,
@@ -1939,7 +2073,6 @@ RUN mkdir -p /output && shiv \\
                     "docker",
                     "buildx",
                     "build",
-                    "--no-cache",
                     "--platform",
                     docker_platform,
                     "-t",
@@ -1962,6 +2095,8 @@ RUN mkdir -p /output && shiv \\
                 ["docker", "create", "--name", container_name, image_tag],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if run_result.returncode != 0:
                 raise RuntimeError(f"Failed to create container: {run_result.stderr}")
@@ -2121,6 +2256,14 @@ RUN mkdir -p /output && shiv \\
             }
         }
 
+        # Add azure_tenant_id for Azure providers (needed for Cognito login key)
+        if profile.provider_type == "azure" or "microsoftonline.com" in profile.provider_domain:
+            # Extract tenant ID from provider_domain
+            import re
+            tenant_match = re.search(r"([0-9a-f-]{36})", profile.provider_domain)
+            if tenant_match:
+                config[profile_name]["azure_tenant_id"] = tenant_match.group(1)
+
         # Add the appropriate federation field based on type
         if federation_type == "direct":
             config[profile_name]["federated_role_arn"] = federation_identifier
@@ -2129,6 +2272,11 @@ RUN mkdir -p /output && shiv \\
         else:
             config[profile_name]["identity_pool_id"] = federation_identifier
             config[profile_name]["federation_type"] = "cognito"
+            # Include federated_role_arn for cognito too (used for sts:AssumeRole with tags)
+            # Prefer the value captured from stack outputs; fall back to the stored profile value.
+            _cfn_role_arn = locals().get("federated_role_arn") or getattr(profile, "federated_role_arn", None)
+            if _cfn_role_arn:
+                config[profile_name]["federated_role_arn"] = _cfn_role_arn
 
         # Add cognito_user_pool_id if it's a Cognito provider
         if profile.provider_type == "cognito" and profile.cognito_user_pool_id:
@@ -2170,8 +2318,14 @@ RUN mkdir -p /output && shiv \\
             if provisioner_arn:
                 config[profile_name]["inference_profiles_provisioner_arn"] = provisioner_arn
 
+        # Add quota API endpoint if configured
+        quota_api_endpoint = getattr(profile, "quota_api_endpoint", None)
+        if quota_api_endpoint:
+            config[profile_name]["quota_api_endpoint"] = quota_api_endpoint
+            config[profile_name]["quota_check_interval"] = getattr(profile, "quota_check_interval", 300)
+
         config_path = output_dir / "config.json"
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
         return config_path
 
@@ -2215,7 +2369,7 @@ RUN mkdir -p /output && shiv \\
         except Exception:
             return "oidc"  # Default to generic OIDC on parsing error
 
-    def _create_installer(self, output_dir: Path, profile, built_executables, built_otel_helpers=None) -> Path:
+    def _create_installer(self, output_dir: Path, profile, built_executables, built_otel_helpers=None, profile_name: str = "ClaudeCode") -> Path:
         """Create simple installer script."""
 
         # Determine which binaries were built
@@ -2511,23 +2665,27 @@ echo
 """
 
         installer_path = output_dir / "install.sh"
-        with open(installer_path, "w") as f:
+        with open(installer_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(installer_content)
         installer_path.chmod(0o755)
 
         # Create Windows installer only if Windows builds are enabled (CodeBuild)
         if "windows" in platforms_built or (hasattr(profile, "enable_codebuild") and profile.enable_codebuild):
-            self._create_windows_installer(output_dir, profile)
+            self._create_windows_installer(output_dir, profile, profile_name=profile_name)
 
         return installer_path
 
-    def _create_windows_installer(self, output_dir: Path, profile) -> Path:
+    def _create_windows_installer(self, output_dir: Path, profile, profile_name: str = "ClaudeCode") -> Path:
         """Create Windows batch installer script."""
 
         installer_content = f"""@echo off
+setlocal EnableDelayedExpansion
 REM Claude Code Authentication Installer for Windows
 REM Organization: {profile.provider_domain}
 REM Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+set "INSTALL_DIR=%USERPROFILE%\\claude-code-with-bedrock"
+set "SCRIPT_DIR=%~dp0"
 
 echo ======================================
 echo Claude Code Authentication Installer
@@ -2538,7 +2696,6 @@ echo.
 
 REM Check prerequisites
 echo Checking prerequisites...
-
 where aws >nul 2>&1
 if %errorlevel% neq 0 (
     echo ERROR: AWS CLI is not installed
@@ -2546,63 +2703,50 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
-
 echo OK Prerequisites found
 echo.
 
 REM Create directory
 echo Installing authentication tools...
-if not exist "%USERPROFILE%\\claude-code-with-bedrock" mkdir "%USERPROFILE%\\claude-code-with-bedrock"
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
 REM Copy credential process executable with renamed target
 echo Copying credential process...
-copy /Y "credential-process-windows.exe" "%USERPROFILE%\\claude-code-with-bedrock\\credential-process.exe" >nul
+REM Terminate any running instance (prevents file-in-use on reinstall)
+taskkill /F /IM "credential-process.exe" >nul 2>&1
+ping -n 3 127.0.0.1 >nul 2>&1
+copy /Y "%SCRIPT_DIR%credential-process-windows.exe" "%INSTALL_DIR%\\credential-process.exe" >nul
 if %errorlevel% neq 0 (
-    echo ERROR: Failed to copy credential-process-windows.exe
-    pause
-    exit /b 1
+    echo Retrying after brief wait...
+    ping -n 4 127.0.0.1 >nul 2>&1
+    copy /Y "%SCRIPT_DIR%credential-process-windows.exe" "%INSTALL_DIR%\\credential-process.exe" >nul
+    if %errorlevel% neq 0 (
+        echo ERROR: Failed to copy credential-process-windows.exe
+        echo        Close Claude Desktop / CLI and retry install.
+        pause
+        exit /b 1
+    )
 )
 
-REM Copy OTEL helper if it exists with renamed target
-if exist "otel-helper-windows.exe" (
+REM Copy OTEL helper if it exists
+if exist "%SCRIPT_DIR%otel-helper-windows.exe" (
     echo Copying OTEL helper...
-    copy /Y "otel-helper-windows.exe" "%USERPROFILE%\\claude-code-with-bedrock\\otel-helper.exe" >nul
+    copy /Y "%SCRIPT_DIR%otel-helper-windows.exe" "%INSTALL_DIR%\\otel-helper.exe" >nul
 )
 
 REM Copy configuration
 echo Copying configuration...
-copy /Y "config.json" "%USERPROFILE%\\claude-code-with-bedrock\\" >nul
+copy /Y "%SCRIPT_DIR%config.json" "%INSTALL_DIR%\\" >nul
 
-REM Copy Claude Code settings if they exist
-if exist "claude-settings" (
-    echo Copying Claude Code telemetry settings...
+REM Copy Claude Code settings (awsAuthRefresh and ARNs are set automatically by --setup-profiles below)
+if exist "%SCRIPT_DIR%claude-settings\\settings.json" (
+    echo Configuring Claude Code settings...
     if not exist "%USERPROFILE%\\.claude" mkdir "%USERPROFILE%\\.claude"
-
-    REM Copy settings and replace placeholders
-    if exist "claude-settings\\settings.json" (
-        set SKIP_SETTINGS=false
-        if exist "%USERPROFILE%\\.claude\\settings.json" (
-            echo Existing Claude Code settings found
-            set /p OVERWRITE="Overwrite with new settings? (y/n): "
-            if /i not "%OVERWRITE%"=="y" (
-                echo Skipping Claude Code settings...
-                set SKIP_SETTINGS=true
-            )
-        )
-
-        if not "%SKIP_SETTINGS%"=="true" (
-            REM Use PowerShell to replace placeholders
-            powershell -Command ^
-            "$otelPath = '%USERPROFILE%\\\\claude-code-with-bedrock\\\\otel-helper.exe' ^
-            -replace '\\\\\\\\', '/'; ^
-            $credPath = '%USERPROFILE%\\\\claude-code-with-bedrock\\\\credential-process.exe' ^
-            -replace '\\\\\\\\', '/'; ^
-            (Get-Content 'claude-settings\\\\settings.json') ^
-            -replace '__OTEL_HELPER_PATH__', $otelPath ^
-            -replace '__CREDENTIAL_PROCESS_PATH__', $credPath | ^
-            Set-Content '%USERPROFILE%\\\\.claude\\\\settings.json'"
-            echo OK Claude Code settings configured
-        )
+    copy /Y "%SCRIPT_DIR%claude-settings\\settings.json" "%USERPROFILE%\\.claude\\settings.json" >nul
+    if %errorlevel% equ 0 (
+        echo   OK Claude Code settings configured
+    ) else (
+        echo   WARNING: Failed to copy Claude Code settings
     )
 )
 
@@ -2611,19 +2755,17 @@ echo.
 echo Configuring AWS profiles...
 
 REM Read profiles from config.json using PowerShell
-for /f %%p in ('powershell -Command ^
-"& {{$c=Get-Content config.json|ConvertFrom-Json;$c.PSObject.Properties.Name}}"') do (
+for /f %%p in ('powershell -NoProfile -Command ^
+    "& {{(Get-Content '%SCRIPT_DIR%config.json'|ConvertFrom-Json).PSObject.Properties.Name}}"') do (
     echo Configuring AWS profile: %%p
 
     REM Get profile-specific region
-    for /f %%r in ('powershell -Command ^
-    "& {{$c=Get-Content config.json|ConvertFrom-Json;$c.'%%p'.aws_region}}"') do set PROFILE_REGION=%%r
+    for /f %%r in ('powershell -NoProfile -Command ^
+        "& {{(Get-Content '%SCRIPT_DIR%config.json'|ConvertFrom-Json).'%%p'.aws_region}}"') do set PROFILE_REGION=%%r
 
-
-    REM Set credential process with --profile flag (cross-platform, no wrapper needed)
+    REM Set credential process with --profile flag
     aws configure set credential_process ^
-    "%USERPROFILE%\\claude-code-with-bedrock\\credential-process.exe --profile %%p" --profile %%p
-
+        "%INSTALL_DIR%\\credential-process.exe --profile %%p" --profile %%p
 
     REM Set region
     if defined PROFILE_REGION (
@@ -2635,14 +2777,76 @@ for /f %%p in ('powershell -Command ^
     echo   OK Created AWS profile '%%p'
 )
 
+REM Setup inference profiles (authenticates via browser and creates per-user Bedrock profiles)
+echo.
+echo Setting up your personal Bedrock inference profiles...
+echo This will open your browser for authentication.
+echo.
+REM Copy Windows credential helper before setup-profiles so the exe can reference it when
+REM creating claude_desktop_config.json for new installs.
+if exist "%SCRIPT_DIR%credential-helper-{profile_name}.bat" (
+    copy /Y "%SCRIPT_DIR%credential-helper-{profile_name}.bat" "%INSTALL_DIR%\\" >nul
+    echo   OK Credential helper installed
+)
+REM Use a clean AWS config so botocore inside the exe does not recurse into
+REM the credential_process (which would fail before the profile is ready).
+set "CCWB_TMP_CFG=%TEMP%\\ccwb-setup-%RANDOM%.ini"
+echo ; ccwb temp config > "%CCWB_TMP_CFG%"
+set "AWS_CONFIG_FILE=%CCWB_TMP_CFG%"
+for /f %%p in ('powershell -NoProfile -Command ^
+    "& {{(Get-Content '%SCRIPT_DIR%config.json'|ConvertFrom-Json).PSObject.Properties.Name | Select-Object -First 1}}"') do (
+    "%INSTALL_DIR%\\credential-process.exe" --profile %%p --setup-profiles
+    set "_SETUP_RC=!errorlevel!"
+)
+set "AWS_CONFIG_FILE="
+del "%CCWB_TMP_CFG%" >nul 2>&1
+if !_SETUP_RC! neq 0 (
+    echo.
+    echo WARNING: Inference profile setup failed.
+    echo You can retry manually later by running:
+    echo   "%INSTALL_DIR%\\credential-process.exe" --profile {profile_name} --setup-profiles
+) else (
+    echo   OK Inference profiles configured successfully
+)
+"""
+        # CoWork / Claude Desktop section (only when CoWork is enabled)
+        if getattr(profile, "cowork_3p_enabled", True):
+            installer_content += f"""
+REM ============================================================
+REM Claude Desktop / Cowork configuration
+REM ============================================================
+echo.
+echo Configuring Claude Desktop / Cowork...
+
+REM Note: claude_desktop_config.json is created/updated automatically by --setup-profiles above.
+REM       The credential-helper was already copied before --setup-profiles.
+
+REM Optional: Apply Windows registry policy for MDM/GPO managed deployments
+REM This requires administrator privileges and targets HKLM for machine-wide policy.
+REM For personal installs, the claude_desktop_config.json above is sufficient.
+if exist "%SCRIPT_DIR%cowork-3p.reg" (
+    net session >nul 2>&1
+    if %errorlevel% equ 0 (
+        reg import "%SCRIPT_DIR%cowork-3p.reg" >nul 2>&1
+        if %errorlevel% equ 0 (
+            echo   OK Claude Desktop / Cowork registry policy applied (machine-wide)
+        ) else (
+            echo   WARNING: Registry import failed
+        )
+    ) else (
+        echo   NOTE: Skipping machine-wide registry policy (not running as Administrator)
+    )
+)
+"""
+
+        installer_content += f"""
 echo.
 echo ======================================
 echo Installation complete!
 echo ======================================
 echo.
 echo Available profiles:
-for /f %%p in ('powershell -Command ^
-"$config = Get-Content config.json | ConvertFrom-Json; $config.PSObject.Properties.Name"') do (
+for /f %%p in ('powershell -NoProfile -Command "$c=Get-Content '%SCRIPT_DIR%config.json'|ConvertFrom-Json;$c.PSObject.Properties.Name"') do (
     echo   - %%p
 )
 echo.
@@ -2651,11 +2855,8 @@ echo   set AWS_PROFILE=^<profile-name^>
 echo   aws sts get-caller-identity
 echo.
 echo Example:
-for /f %%p in ('powershell -Command ^
-"$config = Get-Content config.json | ConvertFrom-Json; $config.PSObject.Properties.Name | Select-Object -First 1"') do (
-    echo   set AWS_PROFILE=%%p
-    echo   aws sts get-caller-identity
-)
+echo   set AWS_PROFILE={profile_name}
+echo   aws sts get-caller-identity
 echo.
 echo Note: Authentication will automatically open your browser when needed.
 echo.
@@ -2669,7 +2870,7 @@ pause
         # Note: chmod not needed on Windows batch files
         return installer_path
 
-    def _create_documentation(self, output_dir: Path, profile, timestamp: str):
+    def _create_documentation(self, output_dir: Path, profile, timestamp: str, profile_name: str = "claude-code"):
         """Create user documentation."""
         readme_content = f"""# Claude Code Authentication Setup
 
@@ -2690,7 +2891,7 @@ pause
 
 3. Use the AWS profile:
    ```bash
-   export AWS_PROFILE=claude-code-default
+   export AWS_PROFILE={profile_name}
    aws sts get-caller-identity
    ```
 
@@ -2738,13 +2939,13 @@ install.bat
 The installer will:
 - Check for AWS CLI installation
 - Copy authentication tools to `%USERPROFILE%\\claude-code-with-bedrock`
-- Configure the AWS profile "claude-code-default"
+- Configure the AWS profile "{profile_name}"
 - Test the authentication
 
 #### Step 4: Use Claude Code
 ```cmd
 # Set the AWS profile
-set AWS_PROFILE=claude-code-default
+set AWS_PROFILE={profile_name}
 
 # Verify authentication works
 aws sts get-caller-identity
@@ -2754,7 +2955,7 @@ aws sts get-caller-identity
 
 For PowerShell users:
 ```powershell
-$env:AWS_PROFILE = "claude-code-default"
+$env:AWS_PROFILE = "{profile_name}"
 aws sts get-caller-identity
 ```
 
@@ -2970,3 +3171,37 @@ Available metrics include:
 
         except Exception as e:
             console.print(f"[yellow]Warning: Could not create Claude Code settings: {e}[/yellow]")
+
+    def _generate_cowork_3p_mdm_config(
+        self,
+        output_dir: Path,
+        profile,
+        profile_name: str = "ClaudeCode",
+    ) -> None:
+        """Generate Claude Cowork 3P MDM configuration files."""
+        from claude_code_with_bedrock.cli.utils.cowork_3p import (
+            add_monitoring_config,
+            build_mdm_config,
+            derive_model_aliases,
+            generate_all,
+            generate_credential_helper_wrapper,
+        )
+
+        console = Console()
+
+        try:
+            bedrock_region = self._get_bedrock_region_for_profile(profile)
+            model_aliases = derive_model_aliases()
+
+            mdm_config = build_mdm_config(
+                bedrock_region=bedrock_region,
+                model_aliases=model_aliases,
+                profile_name=profile_name,
+            )
+
+            generate_credential_helper_wrapper(profile_name, bedrock_region)
+            add_monitoring_config(mdm_config, profile, console)
+            generate_all(output_dir, mdm_config, console, profile_name=profile_name)
+
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not generate CoWork 3P config: {e}[/yellow]")
