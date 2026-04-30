@@ -159,6 +159,17 @@ Resources:
               StringEquals:
                 'aws:RequestedRegion': !Ref AllowedBedrockRegions
                 'aws:ResourceTag/user.email': '${aws:PrincipalTag/email}'
+          # Allow generating a Bedrock bearer token (presigned URL) for Claude Desktop / Cowork.
+          # credential-process --credential-helper signs a CallWithBearerToken presigned URL;
+          # Bedrock now enforces this IAM action when the bearer token is redeemed.
+          - Sid: AllowBedrockCallWithBearerToken
+            Effect: Allow
+            Action:
+              - 'bedrock:CallWithBearerToken'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedBedrockRegions
           - Sid: AllowBedrockList
             Effect: Allow
             Action:
