@@ -3,8 +3,8 @@ name: Build macOS binaries (arm64 + intel)
 description: |
   Builds credential-process and otel-helper for both Apple Silicon (arm64) and
   Intel (x86_64) using PyInstaller on GitHub-hosted macOS runners.
-  - macos-latest (Apple Silicon) → *-macos-arm64 binaries
-  - macos-13     (Intel x86_64)  → *-macos-intel binaries
+  - macos-latest (Apple Silicon) → *-macos-arm64 binaries (native)
+  - macos-latest (Apple Silicon) → *-macos-intel binaries (x86_64 via Rosetta cross-compile)
   Both jobs run in parallel and commit results to source/binaries/ when done.
   Triggered manually via workflow_dispatch.
   Artifacts are uploaded and retained for 90 days.
@@ -129,7 +129,7 @@ jobs:
 
   build-macos-intel:
     name: Build macOS Intel (x86_64) binaries
-    runs-on: macos-13       # last GitHub-hosted Intel runner
+    runs-on: macos-latest   # Apple Silicon; cross-compiles x86_64 via Rosetta 2
     timeout-minutes: 30
     permissions:
       contents: write
