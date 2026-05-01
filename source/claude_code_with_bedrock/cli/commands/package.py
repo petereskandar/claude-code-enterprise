@@ -222,11 +222,16 @@ class PackageCommand(Command):
             _allowed_os: set = set()
             for _tp in _tp_list:
                 if _tp == "all":
-                    _allowed_os.update(["windows", "macos", "linux"])
+                    _allowed_os.update(["windows", "macos-arm64", "macos-intel", "linux"])
                 elif _tp == "windows":
                     _allowed_os.add("windows")
+                elif _tp in ("macos-arm64", "macos-arm64 (pyinstaller)", "macos-arm64 (shiv)"):
+                    _allowed_os.add("macos-arm64")
+                elif _tp in ("macos-intel", "macos-intel (pyinstaller)"):
+                    _allowed_os.add("macos-intel")
                 elif _tp.startswith("macos") or _tp == "macos":
-                    _allowed_os.add("macos")
+                    # generic macos target — include all macos architecture variants
+                    _allowed_os.update(["macos-arm64", "macos-intel"])
                 elif _tp.startswith("linux") or _tp == "linux":
                     _allowed_os.add("linux")
 
