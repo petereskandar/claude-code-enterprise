@@ -102,10 +102,28 @@ class MultiProviderAuth:
         # Initialize credential storage
         self._init_credential_storage()
 
+    def _log_to_file(self, message):
+        """Append message to log file — visible even when running as a subprocess with piped I/O."""
+        try:
+            log_dir = Path.home() / ".claude-code-session"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "credential-process.log"
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{timestamp} [{self.profile}] {message}\n")
+        except Exception:
+            pass  # Never let logging crash the credential provider
+
+    def _status_print(self, message):
+        """Always print status to stderr and log file (diagnostic — not gated by debug mode)."""
+        print(f"[credential-process] {message}", file=sys.stderr, flush=True)
+        self._log_to_file(message)
+
     def _debug_print(self, message):
         """Print debug message only if debug mode is enabled"""
         if self.debug:
-            print(f"Debug: {message}", file=sys.stderr)
+            print(f"Debug: {message}", file=sys.stderr, flush=True)
+            self._log_to_file(f"DEBUG: {message}")
 
     def _auto_detect_profile(self):
         """Auto-detect profile name from config.json when only one profile exists."""
@@ -888,19 +906,22 @@ class MultiProviderAuth:
                 _srv = _cls((_host, self.redirect_port), handler_class)
                 threading.Thread(target=_srv.handle_request, daemon=True).start()
                 _cb_started += 1
-                self._debug_print(f"Callback server listening on [{_host}]:{self.redirect_port}")
+                self._status_print(f"Callback listener started on [{_host}]:{self.redirect_port}")
             except OSError as _e:
-                self._debug_print(f"Callback server [{_host}]:{self.redirect_port} unavailable: {_e}")
+                self._status_print(f"Callback listener [{_host}]:{self.redirect_port} unavailable: {_e}")
 
         if _cb_started == 0:
             raise Exception(f"Cannot start callback server on port {self.redirect_port}")
 
         # Open browser
-        self._debug_print(f"Opening browser for {self.provider_config['name']} authentication...")
-        self._debug_print(f"If browser doesn't open, visit: {auth_url}")
-        webbrowser.open(auth_url)
+        self._status_print(f"Opening browser for {self.provider_config['name']} authentication...")
+        self._status_print(f"Auth URL (if browser does not open, paste this manually): {auth_url}")
+        _browser_ok = webbrowser.open(auth_url)
+        if not _browser_ok:
+            self._status_print("WARNING: webbrowser.open() returned False — browser may not have opened")
 
         # Poll for callback result (5-minute timeout, 200 ms resolution)
+        self._status_print("Waiting up to 5 minutes for browser callback on localhost:8400...")
         _deadline = time.monotonic() + 300
         while time.monotonic() < _deadline:
             if auth_result["code"] or auth_result["error"]:
@@ -2401,9 +2422,11 @@ class MultiProviderAuth:
     def run(self):
         """Main execution flow"""
         try:
+            self._status_print(f"Starting credential check for profile '{self.profile}'")
             # Check cache first
             cached = self.get_cached_credentials()
             if cached:
+                self._status_print("Using valid cached credentials (still within expiry window)")
                 # Periodic quota re-check even with cached credentials
                 if self._should_recheck_quota():
                     self._debug_print("Performing periodic quota re-check...")
@@ -2423,27 +2446,28 @@ class MultiProviderAuth:
                 print(json.dumps(cached))  # noqa: S105
                 return 0
 
+            self._status_print("Cached credentials expired or missing — need to refresh")
             # Try to acquire port lock by testing if we can bind to it
             test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 test_socket.bind(("127.0.0.1", self.redirect_port))
                 test_socket.close()
                 # We got the port, we can proceed with authentication
-                self._debug_print("Port available, proceeding with authentication")
+                self._status_print(f"Port {self.redirect_port} is available — proceeding with authentication")
             except OSError as e:
                 if e.errno == errno.EADDRINUSE:
                     # Port in use, another auth is in progress
-                    self._debug_print("Another authentication is in progress, waiting...")
+                    self._status_print(f"Port {self.redirect_port} is busy — another auth process is already running, waiting up to 60s...")
                     test_socket.close()
 
                     # Wait for the other process to complete
                     cached = self._wait_for_auth_completion()
                     if cached:
+                        self._status_print("Other process completed auth — using its credentials")
                         print(json.dumps(cached))
                         return 0
                     else:
-                        # Only print error to stderr for actual failures
-                        self._debug_print("Authentication timeout or failed in another process")
+                        self._status_print("Timed out waiting for other auth process — it may have failed")
                         return 1
                 else:
                     test_socket.close()
@@ -2452,13 +2476,16 @@ class MultiProviderAuth:
             # Check cache again (another process might have just finished)
             cached = self.get_cached_credentials()
             if cached:
+                self._status_print("Credentials became available (race-free cache check) — returning them")
                 # Output cached credentials (intended behavior for AWS CLI)
                 print(json.dumps(cached))  # noqa: S105
                 return 0
 
             # Try silent refresh using cached id_token before opening browser
+            self._status_print("Attempting silent refresh using cached id_token (no browser needed)...")
             silent_creds, id_token, token_claims = self._try_silent_refresh()
             if silent_creds:
+                self._status_print("Silent refresh succeeded — new AWS credentials obtained without browser")
                 # Check quota if configured (reuse token/claims already fetched above)
                 if self._should_check_quota():
                     if id_token and token_claims:
@@ -2473,7 +2500,7 @@ class MultiProviderAuth:
                 return 0
 
             # Authenticate with OIDC provider (browser popup - only when id_token is also expired)
-            self._debug_print(f"Authenticating with {self.provider_config['name']} for profile '{self.profile}'...")
+            self._status_print(f"Silent refresh failed or id_token also expired — opening browser for {self.provider_config['name']} login...")
             id_token, token_claims = self.authenticate_oidc()
 
             # Check quota before issuing credentials (if configured)
@@ -2488,7 +2515,7 @@ class MultiProviderAuth:
                     self._debug_print(f"Quota check failed (non-blocking): {qe}")
 
             # Get AWS credentials
-            self._debug_print("Exchanging token for AWS credentials...")
+            self._status_print("Browser auth completed — exchanging OIDC token for AWS credentials...")
             credentials = self.get_aws_credentials(id_token, token_claims)
 
             # Cache credentials
@@ -2508,6 +2535,7 @@ class MultiProviderAuth:
                 except Exception as e:
                     self._debug_print(f"Inference profile setup failed (non-fatal): {e}")
 
+            self._status_print("Credentials issued successfully")
             # Output credentials
             # CodeQL: This is not a security issue - this is an AWS credential provider
             # that must output credentials to stdout for AWS CLI to consume them.
@@ -2517,15 +2545,13 @@ class MultiProviderAuth:
             return 0
 
         except KeyboardInterrupt:
-            # User cancelled - no output needed
+            self._status_print("Authentication cancelled by user (KeyboardInterrupt)")
             return 1
         except Exception as e:
             error_msg = str(e)
-            # Only print actual errors to stderr
-            if "timeout" not in error_msg.lower():
-                print(f"Error: {error_msg}", file=sys.stderr)
-            else:
-                self._debug_print(f"Error: {error_msg}")
+            # Always print errors to stderr — including timeouts (they are actionable)
+            print(f"Error: {error_msg}", file=sys.stderr)
+            self._log_to_file(f"ERROR: {error_msg}")
 
             # Provide specific guidance for common errors
             if "NotAuthorizedException" in error_msg and "Token is not from a supported provider" in error_msg:
@@ -2533,10 +2559,12 @@ class MultiProviderAuth:
                 print("Identity pool expects tokens from a specific provider configuration.", file=sys.stderr)
                 print("Please verify your Cognito Identity Pool is configured correctly.", file=sys.stderr)
             elif "timeout" in error_msg.lower():
-                self._debug_print("\nAuthentication timed out. Possible causes:")
-                self._debug_print("- Browser did not complete authentication")
-                self._debug_print("- Network connectivity issues")
-                self._debug_print("- Callback URL was not accessible on localhost:8400")
+                print("\nAuthentication timed out. Possible causes:", file=sys.stderr)
+                print("  - Browser did not open (check log: ~/.claude-code-session/credential-process.log)", file=sys.stderr)
+                print("  - Browser opened but OAuth callback to localhost:8400 failed", file=sys.stderr)
+                print(f"    (on Windows, 'localhost' may resolve to ::1 but server may only listen on 127.0.0.1)", file=sys.stderr)
+                print("  - Network connectivity or firewall blocking the callback", file=sys.stderr)
+                print(f"  Run with --debug for full diagnostics", file=sys.stderr)
             elif "cognito_user_pool_id is required" in error_msg:
                 print("\nConfiguration error: Missing Cognito User Pool ID", file=sys.stderr)
                 print("Please run 'poetry run ccwb init' to reconfigure.", file=sys.stderr)
@@ -2553,6 +2581,12 @@ def main():
     default_profile = os.getenv("CCWB_PROFILE", "claude-code-default")
     parser.add_argument("--profile", "-p", default=default_profile, help="Configuration profile to use")
     parser.add_argument("--version", "-v", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Enable verbose debug output to stderr and ~/.claude-code-session/credential-process.log",
+    )
     parser.add_argument(
         "--get-monitoring-token", action="store_true", help="Get cached monitoring token instead of AWS credentials"
     )
@@ -2594,6 +2628,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Apply --debug flag: set env var so MultiProviderAuth picks it up in __init__
+    if args.debug:
+        os.environ["COGNITO_AUTH_DEBUG"] = "1"
 
     # Handle --set-client-secret before loading full auth config.
     # Secrets must never be passed as CLI arguments — they appear in shell history
