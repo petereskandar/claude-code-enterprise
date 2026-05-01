@@ -469,6 +469,19 @@ class PackageCommand(Command):
         is_linux_only   = all(p.startswith("linux") for p in platforms_to_build)
         is_macos_only   = all(p.startswith("macos") for p in platforms_to_build)
 
+        # If pre-built macOS or Linux binaries are present in the package (copied from
+        # source/binaries/), treat it as a multi-platform package regardless of what
+        # platforms were explicitly built — so install.sh is retained.
+        _has_prebuilt_macos = any(
+            f.name.startswith("credential-process-macos") for f in output_dir.iterdir() if f.is_file()
+        )
+        _has_prebuilt_linux = any(
+            f.name.startswith("credential-process-linux") for f in output_dir.iterdir() if f.is_file()
+        )
+        if _has_prebuilt_macos or _has_prebuilt_linux:
+            is_windows_only = False
+            is_linux_only = False
+
         def _remove(path: Path) -> None:
             if path.exists():
                 if path.is_dir():
@@ -607,6 +620,23 @@ class PackageCommand(Command):
 
         current_system = platform.system().lower()
         current_machine = platform.machine().lower()
+
+        # If a pre-built binary was already copied from source/binaries/ (e.g., macOS arm64
+        # binaries committed by GitHub Actions CI), use it directly instead of building.
+        _prebuilt_names = {
+            "macos-arm64": "credential-process-macos-arm64",
+            "macos-arm64 (pyinstaller)": "credential-process-macos-arm64",
+            "macos-arm64 (shiv)": "credential-process-macos-arm64",
+            "macos-intel": "credential-process-macos-intel",
+            "macos-intel (pyinstaller)": "credential-process-macos-intel",
+        }
+        _prebuilt_name = _prebuilt_names.get(target_platform)
+        if _prebuilt_name:
+            _prebuilt_path = output_dir / _prebuilt_name
+            if _prebuilt_path.exists():
+                console = Console()
+                console.print(f"[dim]Using pre-built binary for {target_platform}: {_prebuilt_name}[/dim]")
+                return _prebuilt_path
 
         # Windows builds use PyInstaller with the project spec file
         if target_platform == "windows":
@@ -1809,6 +1839,20 @@ RUN pyinstaller \
 
     def _build_otel_helper(self, output_dir: Path, target_platform: str) -> Path:
         """Build executable for OTEL helper script."""
+        # If a pre-built otel-helper binary was copied from source/binaries/, use it directly.
+        _otel_prebuilt_names = {
+            "macos-arm64": "otel-helper-macos-arm64",
+            "macos-arm64 (pyinstaller)": "otel-helper-macos-arm64",
+            "macos-arm64 (shiv)": "otel-helper-macos-arm64",
+            "macos-intel": "otel-helper-macos-intel",
+            "macos-intel (pyinstaller)": "otel-helper-macos-intel",
+        }
+        _otel_prebuilt_name = _otel_prebuilt_names.get(target_platform)
+        if _otel_prebuilt_name:
+            _otel_prebuilt_path = output_dir / _otel_prebuilt_name
+            if _otel_prebuilt_path.exists():
+                return _otel_prebuilt_path
+
         # Windows uses Nuitka via CodeBuild
         if target_platform == "windows":
             # Check if the Windows binary already exists (built by _build_executable)
