@@ -213,14 +213,29 @@ class PackageCommand(Command):
 
         # Copy pre-built cross-platform binaries from source/binaries/
         # (e.g. macOS arm64 binaries committed by GitHub Actions CI)
-        # This allows Windows/Linux developers to produce complete multi-platform packages
-        # without needing a macOS machine.
+        # Only copies binaries that match the target OS — each OS gets its own dedicated package.
         import shutil as _shutil_pre
         _binaries_src = Path(__file__).parent.parent.parent.parent / "binaries"
         if _binaries_src.exists():
+            # Determine which OS names are allowed based on the requested target platform(s)
+            _tp_list = target_platform if isinstance(target_platform, list) else [target_platform]
+            _allowed_os: set = set()
+            for _tp in _tp_list:
+                if _tp == "all":
+                    _allowed_os.update(["windows", "macos", "linux"])
+                elif _tp == "windows":
+                    _allowed_os.add("windows")
+                elif _tp.startswith("macos") or _tp == "macos":
+                    _allowed_os.add("macos")
+                elif _tp.startswith("linux") or _tp == "linux":
+                    _allowed_os.add("linux")
+
             _copied = []
             for _bf in sorted(_binaries_src.iterdir()):
                 if _bf.is_file() and not _bf.name.startswith('.'):
+                    # Skip binaries that don't belong to the target OS
+                    if _allowed_os and not any(f"-{_os}" in _bf.name for _os in _allowed_os):
+                        continue
                     _dst = output_dir / _bf.name
                     _shutil_pre.copy2(_bf, _dst)
                     # Ensure executable bit on Unix/Mac (no-op on Windows)
@@ -418,7 +433,7 @@ class PackageCommand(Command):
 
         # Create documentation
         console.print("[cyan]Creating documentation...[/cyan]")
-        self._create_documentation(output_dir, profile, timestamp, profile_name)
+        self._create_documentation(output_dir, profile, timestamp, profile_name, platforms_to_build)
 
         # Always create Claude Code settings (required for Bedrock configuration)
         console.print("[cyan]Creating Claude Code settings...[/cyan]")
@@ -466,21 +481,8 @@ class PackageCommand(Command):
         import shutil as _shutil
 
         is_windows_only = all(p == "windows" for p in platforms_to_build)
-        is_linux_only   = all(p.startswith("linux") for p in platforms_to_build)
-        is_macos_only   = all(p.startswith("macos") for p in platforms_to_build)
-
-        # If pre-built macOS or Linux binaries are present in the package (copied from
-        # source/binaries/), treat it as a multi-platform package regardless of what
-        # platforms were explicitly built — so install.sh is retained.
-        _has_prebuilt_macos = any(
-            f.name.startswith("credential-process-macos") for f in output_dir.iterdir() if f.is_file()
-        )
-        _has_prebuilt_linux = any(
-            f.name.startswith("credential-process-linux") for f in output_dir.iterdir() if f.is_file()
-        )
-        if _has_prebuilt_macos or _has_prebuilt_linux:
-            is_windows_only = False
-            is_linux_only = False
+        is_linux_only   = all(p.startswith("linux") or p == "linux" for p in platforms_to_build)
+        is_macos_only   = all(p.startswith("macos") or p == "macos" for p in platforms_to_build)
 
         def _remove(path: Path) -> None:
             if path.exists():
@@ -535,6 +537,21 @@ class PackageCommand(Command):
             console.print("To create a distribution package: [cyan]poetry run ccwb distribute[/cyan]")
         else:
             console.print("Share the dist folder with your users for installation")
+
+        # Auto-stage to C:\Users\eskandar\tmp\dist\<os>\<timestamp>\ when staging root exists
+        import shutil as _shutil_stage
+        _staging_root = Path(r"C:\Users\eskandar\tmp\dist")
+        if _staging_root.exists():
+            _os_folder = (
+                "windows" if all(p == "windows" for p in platforms_to_build) else
+                "macos"   if all(p.startswith("macos") or p == "macos" for p in platforms_to_build) else
+                "linux"   if all(p.startswith("linux") or p == "linux" for p in platforms_to_build) else
+                "multi"
+            )
+            _staging_dst = _staging_root / _os_folder / timestamp
+            _staging_dst.parent.mkdir(parents=True, exist_ok=True)
+            _shutil_stage.copytree(str(output_dir), str(_staging_dst))
+            console.print(f"\n[bold green]✓ Staged to: {_staging_dst}[/bold green]")
 
         return 0
 
@@ -2936,135 +2953,322 @@ pause
         # Note: chmod not needed on Windows batch files
         return installer_path
 
-    def _create_documentation(self, output_dir: Path, profile, timestamp: str, profile_name: str = "claude-code"):
-        """Create user documentation."""
-        readme_content = f"""# Claude Code Authentication Setup
+    def _create_documentation(
+        self,
+        output_dir: Path,
+        profile,
+        timestamp: str,
+        profile_name: str = "claude-code",
+        platforms_to_build: list | None = None,
+    ):
+        """Create OS-specific user documentation matching the dist README format."""
+        if platforms_to_build is None:
+            platforms_to_build = []
+
+        provider_name = getattr(profile, "provider_name", None) or profile.provider_domain
+
+        is_windows_only = all(p == "windows" for p in platforms_to_build)
+        is_linux_only   = all(p.startswith("linux") or p == "linux" for p in platforms_to_build)
+        is_macos_only   = all(p.startswith("macos") or p == "macos" for p in platforms_to_build)
+
+        if is_windows_only:
+            readme_content = f"""# Claude Code with Amazon Bedrock - Windows Package
+
+## Prerequisites
+
+### Required (Claude Code CLI)
+
+1. **Node.js 18+** - Required to install Claude Code CLI
+   - Download: https://nodejs.org/ (LTS recommended)
+   - Verify: `node --version`
+
+2. **Claude Code CLI** - Install after Node.js
+   ```cmd
+   npm install -g @anthropic-ai/claude-code
+   ```
+   - Verify: `claude --version`
+
+3. **AWS CLI** - Required by the installer to configure the AWS credential profile
+   - Download: https://aws.amazon.com/cli/
+   - Verify: `aws --version`
+
+### Optional (Claude Desktop / Cowork only)
+
+4. **Claude Desktop** - For Cowork / Claude Desktop with Bedrock
+   - Download: https://claude.ai/download
 
 ## Quick Start
 
-### macOS/Linux
+1. Extract this ZIP file
+2. Run `install.bat` as Administrator
+3. The installer will open your browser for {provider_name} authentication
+4. After setup completes, open a new terminal and run `claude`
 
-1. Extract the package:
-   ```bash
-   unzip claude-code-package-*.zip
-   cd claude-code-package
-   ```
+## What Gets Installed
 
-2. Run the installer:
-   ```bash
-   ./install.sh
-   ```
+| File | Location | Purpose |
+|------|----------|---------|
+| credential-process.exe | %USERPROFILE%\\claude-code-with-bedrock\\ | OIDC authentication binary |
+| config.json | %USERPROFILE%\\claude-code-with-bedrock\\ | Connection configuration |
+| credential-helper-{profile_name}.bat | %USERPROFILE%\\claude-code-with-bedrock\\ | Credential helper for Claude Desktop |
+| AWS profile | %USERPROFILE%\\.aws\\config | AWS CLI profile '{profile_name}' |
+| Claude settings | %USERPROFILE%\\.claude\\settings.json | Claude Code CLI + model settings |
+| Claude Desktop config | %LOCALAPPDATA%\\Claude-3p\\claude_desktop_config.json | Claude Desktop enterprise config |
+| Registry keys (optional) | HKLM\\SOFTWARE\\Policies\\Anthropic | Claude Desktop Bedrock config (admin only) |
 
-3. Use the AWS profile:
-   ```bash
-   export AWS_PROFILE={profile_name}
-   aws sts get-caller-identity
-   ```
+## What Happens During Install
 
-### Windows
+1. Files are copied to `%USERPROFILE%\\claude-code-with-bedrock\\`
+2. AWS CLI profile `{profile_name}` is configured
+3. Claude Code settings are written to `%USERPROFILE%\\.claude\\settings.json`
+4. Claude Desktop enterprise config written to `%LOCALAPPDATA%\\Claude-3p\\claude_desktop_config.json`
+5. Registry keys imported if running as Administrator (machine-wide policy, optional)
+6. **Inference profile setup**: authenticates via {provider_name} and creates per-user Bedrock inference profiles (this writes model ARNs into settings.json and claude_desktop_config.json)
 
-#### Step 1: Download the Package
-```powershell
-# Use the Invoke-WebRequest command provided by your IT administrator
-Invoke-WebRequest -Uri "URL_PROVIDED" -OutFile "claude-code-package.zip"
-```
+## Claude Code CLI
 
-#### Step 2: Extract the Package
+After installation, open a new terminal:
 
-**Option A: Using Windows Explorer**
-1. Right-click on `claude-code-package.zip`
-2. Select "Extract All..."
-3. Choose a destination folder
-4. Click "Extract"
-
-**Option B: Using PowerShell**
-```powershell
-# Extract to current directory
-Expand-Archive -Path "claude-code-package.zip" -DestinationPath "claude-code-package"
-
-# Navigate to the extracted folder
-cd claude-code-package
-```
-
-**Option C: Using Command Prompt**
 ```cmd
-# If you have tar available (Windows 10 1803+)
-tar -xf claude-code-package.zip
-
-# Or use PowerShell from Command Prompt
-powershell -command "Expand-Archive -Path 'claude-code-package.zip' -DestinationPath 'claude-code-package'"
-
-cd claude-code-package
+claude
 ```
 
-#### Step 3: Run the Installer
-```cmd
-install.bat
-```
+## Claude Desktop / Cowork
 
-The installer will:
-- Check for AWS CLI installation
-- Copy authentication tools to `%USERPROFILE%\\claude-code-with-bedrock`
-- Configure the AWS profile "{profile_name}"
-- Test the authentication
+After installation:
 
-#### Step 4: Use Claude Code
-```cmd
-# Set the AWS profile
-set AWS_PROFILE={profile_name}
+1. Open Claude Desktop
+2. It will detect the Bedrock configuration automatically
+3. Select "Continue with Bedrock"
 
-# Verify authentication works
-aws sts get-caller-identity
-
-# Your browser will open automatically for authentication if needed
-```
-
-For PowerShell users:
-```powershell
-$env:AWS_PROFILE = "{profile_name}"
-aws sts get-caller-identity
-```
-
-## What This Does
-
-- Installs the Claude Code authentication tools
-- Configures your AWS CLI to use {profile.provider_domain} for authentication
-- Sets up automatic credential refresh via your browser
-
-## Requirements
-
-- Python 3.8 or later
-- AWS CLI v2
-- pip3
+For MDM deployment, use:
+- `cowork-3p.reg` for Windows (GPO/Intune)
+- `cowork-3p-config.json` for manual JSON import
 
 ## Troubleshooting
 
-### macOS Keychain Access Popup
-On first use, macOS will ask for permission to access the keychain. This is normal and required for \
-secure credential storage. Click "Always Allow" to avoid repeated prompts.
+- **"no InvokeModel permission"**: Inference profiles were not set up. Run:
+  ```cmd
+  "%USERPROFILE%\\claude-code-with-bedrock\\credential-process.exe" --profile {profile_name} --setup-profiles
+  ```
+- **Authentication errors**: Run `credential-process.exe --clear-cache` to reset cached tokens
+- **Claude Desktop not detecting config**: The installer writes `claude_desktop_config.json` to `%LOCALAPPDATA%\\Claude-3p\\`. If missing, re-run `install.bat`.
+"""
 
-### Authentication Issues
-If you encounter issues with authentication:
-- Ensure you're assigned to the Claude Code application in your identity provider
-- Check that port 8400 is available for the callback
-- Contact your IT administrator for help
+        elif is_linux_only:
+            readme_content = f"""# Claude Code with Amazon Bedrock - Linux Package
 
-### Authentication Behavior
+## Prerequisites
 
-The system handles authentication automatically:
-- Your browser will open when authentication is needed
-- Credentials are cached securely to avoid repeated logins
-- Bad credentials are automatically cleared and re-authenticated
+### Required (Claude Code CLI)
 
-To manually clear cached credentials (if needed):
+1. **Node.js 18+** - Required to install Claude Code CLI
+   - Download: https://nodejs.org/ (LTS recommended) or via `nvm`
+   - Verify: `node --version`
+
+2. **Claude Code CLI** - Install after Node.js
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
+   - Verify: `claude --version`
+
+3. **AWS CLI** - Required by the installer to configure the AWS credential profile
+   - Download: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html
+   - Verify: `aws --version`
+
+4. **Ubuntu 20.04+** (or any Linux with GLIBC 2.31+)
+   - Verify: `ldd --version | head -1`
+
+## Quick Start
+
+1. Extract this ZIP file
+2. Run `bash install.sh`
+3. The installer will open your browser for {provider_name} authentication
+4. After setup completes, open a new terminal and run `claude`
+
+## What Gets Installed
+
+| File | Location | Purpose |
+|------|----------|---------|
+| credential-process | ~/claude-code-with-bedrock/ | OIDC authentication binary |
+| config.json | ~/claude-code-with-bedrock/ | Connection configuration |
+| AWS profile | ~/.aws/config | AWS CLI profile '{profile_name}' |
+| Claude settings | ~/.claude/settings.json | Claude Code CLI + model settings |
+
+## What Happens During Install
+
+1. Files are copied to `~/claude-code-with-bedrock/`
+2. AWS CLI profile `{profile_name}` is configured in `~/.aws/config`
+3. Claude Code settings are written to `~/.claude/settings.json`
+4. **Inference profile setup**: authenticates via {provider_name} and creates per-user Bedrock inference profiles (this writes model ARNs into settings.json)
+
+## Claude Code CLI
+
+After installation, open a new terminal:
+
 ```bash
-~/claude-code-with-bedrock/credential-process --clear-cache
+claude
 ```
 
-This will force re-authentication on your next AWS command.
+## Troubleshooting
 
-### Browser doesn't open
-Check that you're not in an SSH session. The browser needs to open on your local machine.
+- **"no InvokeModel permission"**: Inference profiles were not set up. Run:
+  ```bash
+  ~/claude-code-with-bedrock/credential-process --profile {profile_name} --setup-profiles
+  ```
+  > **Note:** If this fails on the first attempt, wait a few seconds and retry — the backend Lambda may be cold-starting.
+
+- **Authentication errors**: Run to reset cached tokens:
+  ```bash
+  ~/claude-code-with-bedrock/credential-process --clear-cache
+  ```
+
+- **Binary not executable**: Run:
+  ```bash
+  chmod +x ~/claude-code-with-bedrock/credential-process
+  ```
+
+- **GLIBC error** (`version 'GLIBC_2.xx' not found`): Your Linux distribution is too old. Ubuntu 20.04+ (GLIBC 2.31+) is required.
+
+- **Browser doesn't open**: If running over SSH, copy the URL printed in the terminal and open it in a browser on your local machine.
+"""
+
+        elif is_macos_only:
+            readme_content = f"""# Claude Code with Amazon Bedrock - macOS Package
+
+## Prerequisites
+
+### Required (Claude Code CLI)
+
+1. **Node.js 18+** - Required to install Claude Code CLI
+   - Download: https://nodejs.org/ (LTS recommended) or via `brew install node`
+   - Verify: `node --version`
+
+2. **Claude Code CLI** - Install after Node.js
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
+   - Verify: `claude --version`
+
+3. **AWS CLI** - Required by the installer to configure the AWS credential profile
+   - Download: https://aws.amazon.com/cli/
+   - Verify: `aws --version`
+
+### Optional (Claude Desktop / Cowork only)
+
+4. **Claude Desktop** - For Cowork / Claude Desktop with Bedrock
+   - Download: https://claude.ai/download
+
+## Quick Start
+
+1. Extract this ZIP file
+2. Run `bash install.sh`
+3. The installer will open your browser for {provider_name} authentication
+4. After setup completes, open a new terminal and run `claude`
+
+## What Gets Installed
+
+| File | Location | Purpose |
+|------|----------|---------|
+| credential-process | ~/claude-code-with-bedrock/ | OIDC authentication binary |
+| config.json | ~/claude-code-with-bedrock/ | Connection configuration |
+| credential-helper-{profile_name}.sh | ~/claude-code-with-bedrock/ | Credential helper for Claude Desktop |
+| AWS profile | ~/.aws/config | AWS CLI profile '{profile_name}' |
+| Claude settings | ~/.claude/settings.json | Claude Code CLI + model settings |
+| Claude Desktop config | ~/Library/Application Support/Claude-3p/ | Claude Desktop enterprise config |
+
+## What Happens During Install
+
+1. Files are copied to `~/claude-code-with-bedrock/`
+2. AWS CLI profile `{profile_name}` is configured in `~/.aws/config`
+3. Claude Code settings are written to `~/.claude/settings.json`
+4. Claude Desktop enterprise config written to `~/Library/Application Support/Claude-3p/`
+5. **Inference profile setup**: authenticates via {provider_name} and creates per-user Bedrock inference profiles (this writes model ARNs into settings.json and claude_desktop_config.json)
+
+## Claude Code CLI
+
+After installation, open a new terminal:
+
+```bash
+claude
+```
+
+## Claude Desktop / Cowork
+
+After installation:
+
+1. Open Claude Desktop
+2. It will detect the Bedrock configuration automatically
+3. Select "Continue with Bedrock"
+
+For MDM deployment, use:
+- `cowork-3p.mobileconfig` for macOS (MDM/profile)
+- `cowork-3p-config.json` for manual JSON import
+
+## Troubleshooting
+
+- **macOS Keychain Access Popup**: On first use, macOS will ask for permission to access the keychain. Click "Always Allow" to avoid repeated prompts.
+
+- **"no InvokeModel permission"**: Inference profiles were not set up. Run:
+  ```bash
+  ~/claude-code-with-bedrock/credential-process --profile {profile_name} --setup-profiles
+  ```
+
+- **Authentication errors**: Run to reset cached tokens:
+  ```bash
+  ~/claude-code-with-bedrock/credential-process --clear-cache
+  ```
+
+- **Binary not executable**: Run:
+  ```bash
+  chmod +x ~/claude-code-with-bedrock/credential-process
+  ```
+
+- **Browser doesn't open**: If running over SSH, copy the URL printed in the terminal and open it in a browser on your local machine.
+"""
+
+        else:
+            # Multi-platform or unknown — generic cross-platform README
+            readme_content = f"""# Claude Code with Amazon Bedrock
+
+## Prerequisites
+
+### Required (Claude Code CLI)
+
+1. **Node.js 18+** - Required to install Claude Code CLI
+   - Download: https://nodejs.org/ (LTS recommended)
+   - Verify: `node --version`
+
+2. **Claude Code CLI** - Install after Node.js
+   ```bash
+   npm install -g @anthropic-ai/claude-code
+   ```
+   - Verify: `claude --version`
+
+3. **AWS CLI** - Required by the installer to configure the AWS credential profile
+   - Download: https://aws.amazon.com/cli/
+   - Verify: `aws --version`
+
+## Quick Start
+
+### macOS / Linux
+1. Extract this ZIP file
+2. Run `bash install.sh`
+3. The installer will open your browser for {provider_name} authentication
+4. After setup completes, open a new terminal and run `claude`
+
+### Windows
+1. Extract this ZIP file
+2. Run `install.bat` as Administrator
+3. The installer will open your browser for {provider_name} authentication
+4. After setup completes, open a new terminal and run `claude`
+
+## Troubleshooting
+
+- **"no InvokeModel permission"**: Run `credential-process --profile {profile_name} --setup-profiles`
+- **Authentication errors**: Run `credential-process --clear-cache` to reset cached tokens
+- **macOS Keychain prompt**: Click "Always Allow" on first use
+- **Browser doesn't open**: Copy the URL from the terminal and open it manually
 
 ## Support
 
@@ -3073,32 +3277,8 @@ Contact your IT administrator for help.
 Configuration Details:
 - Organization: {profile.provider_domain}
 - Region: {profile.aws_region}
-- Package Version: {timestamp}"""
-
-        # Add analytics information if enabled
-        if profile.monitoring_enabled and getattr(profile, "analytics_enabled", True):
-            analytics_section = f"""
-
-## Analytics Dashboard
-
-Your organization has enabled advanced analytics for Claude Code usage. You can access detailed metrics \
-and reports through AWS Athena.
-
-To view analytics:
-1. Open the AWS Console in region {profile.aws_region}
-2. Navigate to Athena
-3. Select the analytics workgroup and database
-4. Run pre-built queries or create custom reports
-
-Available metrics include:
-- Token usage by user
-- Cost allocation
-- Model usage patterns
-- Activity trends
+- Package Version: {timestamp}
 """
-            readme_content += analytics_section
-
-        readme_content += "\n" ""
 
         with open(output_dir / "README.md", "w") as f:
             f.write(readme_content)
