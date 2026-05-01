@@ -129,7 +129,7 @@ jobs:
 
   build-macos-intel:
     name: Build macOS Intel (x86_64) binaries
-    runs-on: macos-latest   # Apple Silicon; cross-compiles x86_64 via Rosetta 2
+    runs-on: macos-latest   # Apple Silicon with Rosetta 2 to produce native x86_64 binaries
     timeout-minutes: 30
     permissions:
       contents: write
@@ -141,29 +141,46 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install Poetry
+      - name: Enable Rosetta 2
         run: |
-          curl -sSL https://install.python-poetry.org | python3 -
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 || true
+          echo "Rosetta install complete"
 
-      - name: Install dependencies
+      - name: Install x86_64 Python 3.12 (universal2 from python.org)
+        run: |
+          # Download universal2 installer – runs as both arm64 and x86_64
+          curl -fsSL -o /tmp/python312.pkg \
+            "https://www.python.org/ftp/python/3.12.9/python-3.12.9-macos11.pkg"
+          sudo installer -pkg /tmp/python312.pkg -target /
+          PYBIN="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+          # Sanity-check: must report x86_64 under arch
+          arch -x86_64 "$PYBIN" -c "import platform; print('arch:', platform.machine())"
+          file "$PYBIN"
+          echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
+
+      - name: Upgrade pip and install Poetry (x86_64 Python)
+        run: |
+          arch -x86_64 "$PYBIN" -m pip install --upgrade pip --quiet
+          arch -x86_64 "$PYBIN" -m pip install poetry --quiet
+          # Make poetry available on PATH for this runner
+          POETRY_BIN="$(arch -x86_64 "$PYBIN" -c "import sysconfig; print(sysconfig.get_path('scripts'))")/poetry"
+          echo "POETRY_BIN=$POETRY_BIN" >> "$GITHUB_ENV"
+          echo "$(dirname "$POETRY_BIN")" >> "$GITHUB_PATH"
+
+      - name: Install project dependencies (x86_64)
         working-directory: source
-        run: poetry install --no-interaction --no-ansi
+        run: |
+          arch -x86_64 "$PYBIN" -m poetry install --no-interaction --no-ansi
 
       - name: Build credential-process-macos-intel
         working-directory: source
         run: |
           mkdir -p /tmp/macos-intel-binaries
-          poetry run pyinstaller \
+          # No --target-arch needed: arch=x86_64 is set by the interpreter itself
+          arch -x86_64 "$PYBIN" -m poetry run pyinstaller \
             --onefile \
             --clean \
             --noconfirm \
-            --target-arch=x86_64 \
             --name=credential-process-macos-intel \
             --distpath=/tmp/macos-intel-binaries \
             --workpath=/tmp/pyinstaller/credential-process \
@@ -179,11 +196,10 @@ jobs:
       - name: Build otel-helper-macos-intel
         working-directory: source
         run: |
-          poetry run pyinstaller \
+          arch -x86_64 "$PYBIN" -m poetry run pyinstaller \
             --onefile \
             --clean \
             --noconfirm \
-            --target-arch=x86_64 \
             --name=otel-helper-macos-intel \
             --distpath=/tmp/macos-intel-binaries \
             --workpath=/tmp/pyinstaller/otel-helper \
@@ -237,3 +253,4 @@ jobs:
             git push origin "HEAD:${BRANCH}"
             echo "✓ macOS Intel binaries committed and pushed to ${BRANCH}"
           fi
+
