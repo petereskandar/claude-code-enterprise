@@ -123,11 +123,7 @@ jobs:
           else
             SIZE_CP=$(wc -c < source/binaries/credential-process-macos-arm64 | tr -d ' ')
             SIZE_OH=$(wc -c < source/binaries/otel-helper-macos-arm64 | tr -d ' ')
-            git commit -m "ci: update macOS arm64 binaries [run ${{ github.run_id }}]
-
-  credential-process-macos-arm64: $((SIZE_CP / 1024)) KB
-  otel-helper-macos-arm64:        $((SIZE_OH / 1024)) KB
-  Built from: ${BRANCH} @ ${{ github.sha }}"
+            git commit -m "ci: update macOS arm64 binaries [run ${{ github.run_id }}] from ${BRANCH} (cp: $((SIZE_CP / 1024))KB, otel: $((SIZE_OH / 1024))KB)"
             git push origin "HEAD:${BRANCH}"
             echo "✓ macOS binaries committed and pushed to ${BRANCH}"
           fi
