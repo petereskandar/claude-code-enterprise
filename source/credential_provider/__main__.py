@@ -1381,6 +1381,28 @@ class MultiProviderAuth:
                 ) from e
             raise Exception(f"Failed to get AWS credentials: {str(e)}") from None
 
+    def _is_port_actively_serving(self) -> bool:
+        """Probe the redirect port with an HTTP request to distinguish a live auth server from a stale socket.
+
+        A previous process that crashed may leave its TCP socket in TIME_WAIT or even LISTEN
+        state, causing EADDRINUSE without anyone actually serving requests.  We probe with a
+        short-timeout HTTP GET: if we get any HTTP response the server is live; if we get a
+        connection-refused or timeout the port is occupied by a zombie.
+
+        Returns True when the port is actively serving (real in-progress auth).
+        """
+        import http.client as _http
+        for _host in ("127.0.0.1", "::1"):
+            try:
+                conn = _http.HTTPConnection(_host, self.redirect_port, timeout=1.5)
+                conn.request("GET", "/probe")
+                conn.getresponse()
+                conn.close()
+                return True  # Got an HTTP response — real server is there
+            except Exception:
+                pass
+        return False  # No response from either loopback address — stale socket
+
     def _wait_for_auth_completion(self, timeout=60):
         """Wait for another process to complete authentication using port-based detection"""
         start_time = time.time()
@@ -1401,7 +1423,12 @@ class MultiProviderAuth:
                     return None
             except OSError as e:
                 if e.errno == errno.EADDRINUSE:
-                    # Port still in use, auth still in progress
+                    # Port still in use — but is it a real server or a zombie?
+                    if not self._is_port_actively_serving():
+                        # Stale socket with no live server — stop waiting
+                        self._status_print(f"Port {self.redirect_port} is occupied by a stale/zombie process (not responding to HTTP) — stopping wait")
+                        return None
+                    # Real server responding — auth still in progress
                     time.sleep(0.5)
                 else:
                     # Other error
@@ -2456,19 +2483,31 @@ class MultiProviderAuth:
                 self._status_print(f"Port {self.redirect_port} is available — proceeding with authentication")
             except OSError as e:
                 if e.errno == errno.EADDRINUSE:
-                    # Port in use, another auth is in progress
-                    self._status_print(f"Port {self.redirect_port} is busy — another auth process is already running, waiting up to 60s...")
-                    test_socket.close()
-
-                    # Wait for the other process to complete
-                    cached = self._wait_for_auth_completion()
-                    if cached:
-                        self._status_print("Other process completed auth — using its credentials")
-                        print(json.dumps(cached))
-                        return 0
+                    # Port in use — probe it to distinguish a live auth server from a stale socket
+                    if not self._is_port_actively_serving():
+                        # Stale/zombie process holding port — do NOT wait; proceed with our own auth.
+                        # authenticate_oidc() starts listeners on BOTH IPv4 and IPv6; even if IPv4
+                        # stays stuck the IPv6 listener will catch the browser callback on Windows.
+                        self._status_print(
+                            f"Port {self.redirect_port} is occupied by a stale/zombie process "
+                            f"(not responding to HTTP) — proceeding with fresh auth"
+                        )
+                        test_socket.close()
+                        # Fall through — do NOT return, let normal flow continue below
                     else:
-                        self._status_print("Timed out waiting for other auth process — it may have failed")
-                        return 1
+                        # Real auth server responding — another process is actively authenticating
+                        self._status_print(f"Port {self.redirect_port} is busy — another auth process is already running, waiting up to 60s...")
+                        test_socket.close()
+
+                        # Wait for the other process to complete
+                        cached = self._wait_for_auth_completion()
+                        if cached:
+                            self._status_print("Other process completed auth — using its credentials")
+                            print(json.dumps(cached))
+                            return 0
+                        else:
+                            self._status_print("Timed out waiting for other auth process — it may have failed")
+                            return 1
                 else:
                     test_socket.close()
                     raise

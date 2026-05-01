@@ -22,13 +22,16 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write   # required to commit macOS binaries back to source/binaries/
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+          # Use a PAT that can push to protected branches, falling back to
+          # the default GITHUB_TOKEN for non-protected refs.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -94,3 +97,37 @@ jobs:
           path: /tmp/macos-binaries/
           retention-days: 90
           if-no-files-found: error
+
+      - name: Commit macOS binaries to source/binaries/
+        run: |
+          set -e
+          BRANCH="${{ inputs.ref || github.ref_name }}"
+          echo "Committing macOS arm64 binaries to source/binaries/ on branch ${BRANCH}"
+
+          # Copy built binaries into the tracked binaries directory
+          mkdir -p source/binaries
+          cp /tmp/macos-binaries/credential-process-macos-arm64 source/binaries/
+          cp /tmp/macos-binaries/otel-helper-macos-arm64 source/binaries/
+          chmod +x source/binaries/credential-process-macos-arm64
+          chmod +x source/binaries/otel-helper-macos-arm64
+
+          # Configure git identity for the commit
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "GitHub Actions"
+
+          git add source/binaries/credential-process-macos-arm64
+          git add source/binaries/otel-helper-macos-arm64
+
+          if git diff --staged --quiet; then
+            echo "No binary changes detected — skipping commit"
+          else
+            SIZE_CP=$(wc -c < source/binaries/credential-process-macos-arm64 | tr -d ' ')
+            SIZE_OH=$(wc -c < source/binaries/otel-helper-macos-arm64 | tr -d ' ')
+            git commit -m "ci: update macOS arm64 binaries [run ${{ github.run_id }}]
+
+  credential-process-macos-arm64: $((SIZE_CP / 1024)) KB
+  otel-helper-macos-arm64:        $((SIZE_OH / 1024)) KB
+  Built from: ${BRANCH} @ ${{ github.sha }}"
+            git push origin "HEAD:${BRANCH}"
+            echo "✓ macOS binaries committed and pushed to ${BRANCH}"
+          fi

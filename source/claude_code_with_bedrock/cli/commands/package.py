@@ -211,6 +211,28 @@ class PackageCommand(Command):
         # Create output directory
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        # Copy pre-built cross-platform binaries from source/binaries/
+        # (e.g. macOS arm64 binaries committed by GitHub Actions CI)
+        # This allows Windows/Linux developers to produce complete multi-platform packages
+        # without needing a macOS machine.
+        import shutil as _shutil_pre
+        _binaries_src = Path(__file__).parent.parent.parent.parent / "binaries"
+        if _binaries_src.exists():
+            _copied = []
+            for _bf in sorted(_binaries_src.iterdir()):
+                if _bf.is_file() and not _bf.name.startswith('.'):
+                    _dst = output_dir / _bf.name
+                    _shutil_pre.copy2(_bf, _dst)
+                    # Ensure executable bit on Unix/Mac (no-op on Windows)
+                    try:
+                        import stat
+                        _dst.chmod(_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    except Exception:
+                        pass
+                    _copied.append(_bf.name)
+            if _copied:
+                console.print(f"\n[dim]Pre-built binaries from source/binaries/: {', '.join(_copied)}[/dim]")
+
         # Create embedded configuration based on federation type
         embedded_config = {
             "provider_domain": profile.provider_domain,
