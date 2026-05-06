@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'CodeBuild for Windows binaries with Nuitka - Claude Code w/ Bedrock'
+Description: 'CodeBuild for Windows and Linux binaries with Nuitka - Claude Code w/ Bedrock'
 
 Parameters:
   ProjectNamePrefix:
@@ -92,6 +92,12 @@ Resources:
                   - s3:ListBucket
                 Resource:
                   - !GetAtt BuildBucket.Arn
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                Resource: '*'
       Tags:
         - Key: Application
           Value: ClaudeCodeWithBedrock
@@ -137,6 +143,8 @@ Resources:
                 - C:\Python312\python.exe --version
                 - echo Checking pip version...
                 - C:\Python312\python.exe -m pip --version
+                - echo Installing MinGW C compiler for Nuitka...
+                - choco install mingw -y --no-progress
 
             pre_build:
               commands:
@@ -151,8 +159,9 @@ Resources:
             build:
               commands:
                 - echo Building Windows executables sequentially...
+                - echo "NOTE - Default AWS profile for developers is claude-code-default"
                 - echo Building credential-process Windows executable...
-                - C:\Python312\python.exe -m nuitka --standalone --onefile --assume-yes-for-downloads --company-name="Claude Code" --product-name="Claude Code Credential Process" --file-version="1.0.0.0" --product-version="1.0.0.0" --windows-file-description="AWS Credential Process for Claude Code" --include-package=keyring.backends --output-filename=credential-process-windows.exe --output-dir=. --remove-output source/credential_provider/__main__.py
+                - $env:PYTHONPATH = "source;$env:PYTHONPATH"; C:\Python312\python.exe -m nuitka --standalone --onefile --assume-yes-for-downloads --company-name="Claude Code" --product-name="Claude Code Credential Process" --file-version="1.0.0.0" --product-version="1.0.0.0" --windows-file-description="AWS Credential Process for Claude Code" --include-package=keyring.backends --include-module=claude_code_with_bedrock.models --output-filename=credential-process-windows.exe --output-dir=. --remove-output source/credential_provider/__main__.py
                 - echo Building otel-helper Windows executable...
                 - C:\Python312\python.exe -m nuitka --standalone --onefile --assume-yes-for-downloads --company-name="Claude Code" --product-name="Claude Code OTEL Helper" --file-version="1.0.0.0" --product-version="1.0.0.0" --windows-file-description="OpenTelemetry Helper for Claude Code" --output-filename=otel-helper-windows.exe --output-dir=. --remove-output source/otel_helper/__main__.py
             post_build:
@@ -178,6 +187,92 @@ Resources:
           Value: ClaudeCodeWithBedrock
         - Key: Purpose
           Value: WindowsBinaryBuild
+
+  # Log Group for Linux CodeBuild
+  LinuxCodeBuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/codebuild/${ProjectNamePrefix}-linux-build'
+      RetentionInDays: 7
+
+  # CodeBuild Project - Linux
+  LinuxBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectNamePrefix}-linux-build'
+      Description: Build Linux binaries for Claude Code with Nuitka
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Ref BuildBucket
+        Name: linux-binaries.zip
+        Packaging: ZIP
+        OverrideArtifactName: false
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        PrivilegedMode: false
+      Source:
+        Type: S3
+        Location: !Sub '${BuildBucket}/source.zip'
+        BuildSpec: |
+          version: 0.2
+
+          phases:
+            install:
+              runtime-versions:
+                python: 3.12
+              commands:
+                - echo Starting Linux build environment setup...
+                - python3 --version
+                - pip3 --version
+
+            pre_build:
+              commands:
+                - echo Installing build dependencies...
+                - pip3 install --upgrade pip
+                - pip3 install nuitka==2.7.12 ordered-set zstandard
+                - echo Installing application dependencies...
+                - pip3 install boto3 requests PyJWT cryptography
+                - pip3 install keyring
+                - pip3 install questionary rich cleo pydantic pyyaml
+                - dnf install -y gcc gcc-c++ patchelf ccache || yum install -y gcc gcc-c++ patchelf ccache || (echo "Installing patchelf via pip" && pip3 install patchelf)
+
+            build:
+              commands:
+                - echo Building Linux executables sequentially...
+                - echo "NOTE - Default AWS profile for developers is claude-code-default"
+                - echo "Verifying gcc..." && gcc --version && which patchelf || true
+                - echo "Verifying source structure..." && ls -la source/ && ls -la source/credential_provider/ && ls -la source/otel_helper/
+                - echo Building credential-process Linux executable...
+                - export PYTHONPATH=source:$PYTHONPATH
+                - python3 -m nuitka --standalone --onefile --assume-yes-for-downloads --company-name="Claude Code" --product-name="Claude Code Credential Process" --file-version="1.0.0" --product-version="1.0.0" --include-package=keyring.backends --include-module=claude_code_with_bedrock.models --output-filename=credential-process-linux --output-dir=. --remove-output source/credential_provider/__main__.py
+                - echo Building otel-helper Linux executable...
+                - python3 -m nuitka --standalone --onefile --assume-yes-for-downloads --company-name="Claude Code" --product-name="Claude Code OTEL Helper" --file-version="1.0.0" --product-version="1.0.0" --output-filename=otel-helper-linux --output-dir=. --remove-output source/otel_helper/__main__.py
+            post_build:
+              commands:
+                - echo Build completed successfully
+                - ls -la credential-process-linux otel-helper-linux
+                - echo Checking file sizes...
+                - du -h credential-process-linux otel-helper-linux
+
+          artifacts:
+            files:
+              - credential-process-linux
+              - otel-helper-linux
+            name: linux-binaries
+
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref LinuxCodeBuildLogGroup
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Application
+          Value: ClaudeCodeWithBedrock
+        - Key: Purpose
+          Value: LinuxBinaryBuild
 
 Outputs:
   BuildBucket:
@@ -209,3 +304,15 @@ Outputs:
     Value: !GetAtt CodeBuildServiceRole.Arn
     Export:
       Name: !Sub '${AWS::StackName}-ServiceRoleArn'
+
+  LinuxProjectName:
+    Description: Linux CodeBuild project name
+    Value: !Ref LinuxBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-LinuxProjectName'
+
+  LinuxProjectArn:
+    Description: Linux CodeBuild project ARN
+    Value: !GetAtt LinuxBuildProject.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LinuxProjectArn'

@@ -22,7 +22,7 @@ class CleanupCommand(Command):
     options = [
         option("force", description="Skip confirmation prompts", flag=True),
         option(
-            "profile", description="AWS profile name to remove (default: ClaudeCode)", flag=False, default="ClaudeCode"
+            "profile", description="AWS profile name to remove (default: claude-code-default)", flag=False, default="claude-code-default"
         ),
         option(
             "credentials-only", description="Only clear cached credentials without removing other components", flag=True
@@ -214,6 +214,6 @@ class CleanupCommand(Command):
 
         console.print("\n[bold]Next steps:[/bold]")
         console.print("• The next AWS command will trigger re-authentication")
-        console.print("• Use 'export AWS_PROFILE=ClaudeCode' to set the profile")
+        console.print("• Use 'export AWS_PROFILE=claude-code-default' to set the profile")
 
         return 0

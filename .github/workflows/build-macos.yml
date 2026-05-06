@@ -1,8 +1,11 @@
 ---
-name: Build macOS binaries (arm64)
+name: Build macOS binaries (arm64 + intel)
 description: |
-  Builds credential-process-macos-arm64 and otel-helper-macos-arm64 using
-  PyInstaller on a GitHub-hosted macos-latest (Apple Silicon) runner.
+  Builds credential-process and otel-helper for both Apple Silicon (arm64) and
+  Intel (x86_64) using PyInstaller on GitHub-hosted macOS runners.
+  - macos-latest (Apple Silicon) → *-macos-arm64 binaries (native)
+  - macos-latest (Apple Silicon) → *-macos-intel binaries (x86_64 via Rosetta cross-compile)
+  Both jobs run in parallel and commit results to source/binaries/ when done.
   Triggered manually via workflow_dispatch.
   Artifacts are uploaded and retained for 90 days.
 on:
@@ -22,13 +25,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write   # required to commit macOS binaries back to source/binaries/
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -80,17 +84,173 @@ jobs:
             --log-level=WARN \
             otel_helper/__main__.py
 
-      - name: Verify binaries
+      - name: Verify arm64 binaries
         run: |
-          echo "=== Built binaries ==="
+          echo "=== Built arm64 binaries ==="
           ls -lh /tmp/macos-binaries/
           file /tmp/macos-binaries/credential-process-macos-arm64
           file /tmp/macos-binaries/otel-helper-macos-arm64
 
-      - name: Upload macOS binaries artifact
+      - name: Upload macOS arm64 binaries artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64-binaries-${{ github.sha }}
           path: /tmp/macos-binaries/
           retention-days: 90
           if-no-files-found: error
+
+      - name: Commit arm64 binaries to source/binaries/
+        run: |
+          set -e
+          BRANCH="${{ inputs.ref || github.ref_name }}"
+          echo "Committing macOS arm64 binaries to source/binaries/ on branch ${BRANCH}"
+
+          mkdir -p source/binaries
+          cp /tmp/macos-binaries/credential-process-macos-arm64 source/binaries/
+          cp /tmp/macos-binaries/otel-helper-macos-arm64 source/binaries/
+          chmod +x source/binaries/credential-process-macos-arm64
+          chmod +x source/binaries/otel-helper-macos-arm64
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "GitHub Actions"
+
+          git add source/binaries/credential-process-macos-arm64
+          git add source/binaries/otel-helper-macos-arm64
+
+          if git diff --staged --quiet; then
+            echo "No binary changes detected — skipping commit"
+          else
+            SIZE_CP=$(wc -c < source/binaries/credential-process-macos-arm64 | tr -d ' ')
+            SIZE_OH=$(wc -c < source/binaries/otel-helper-macos-arm64 | tr -d ' ')
+            git commit -m "ci: update macOS arm64 binaries [run ${{ github.run_id }}] from ${BRANCH} (cp: $((SIZE_CP / 1024))KB, otel: $((SIZE_OH / 1024))KB)"
+            git push origin "HEAD:${BRANCH}"
+            echo "✓ macOS arm64 binaries committed and pushed to ${BRANCH}"
+          fi
+
+  build-macos-intel:
+    name: Build macOS Intel (x86_64) binaries
+    runs-on: macos-latest   # Apple Silicon with Rosetta 2 to produce native x86_64 binaries
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable Rosetta 2
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>&1 || true
+          echo "Rosetta install complete"
+
+      - name: Install x86_64 Python 3.12 (universal2 from python.org)
+        run: |
+          # Download universal2 installer – runs as both arm64 and x86_64
+          curl -fsSL -o /tmp/python312.pkg \
+            "https://www.python.org/ftp/python/3.12.9/python-3.12.9-macos11.pkg"
+          sudo installer -pkg /tmp/python312.pkg -target /
+          PYBIN="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12"
+          # Sanity-check: must report x86_64 under arch
+          arch -x86_64 "$PYBIN" -c "import platform; print('arch:', platform.machine())"
+          file "$PYBIN"
+          echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
+
+      - name: Upgrade pip and install Poetry (x86_64 Python)
+        run: |
+          arch -x86_64 "$PYBIN" -m pip install --upgrade pip --quiet
+          arch -x86_64 "$PYBIN" -m pip install poetry --quiet
+          # Make poetry available on PATH for this runner
+          POETRY_BIN="$(arch -x86_64 "$PYBIN" -c "import sysconfig; print(sysconfig.get_path('scripts'))")/poetry"
+          echo "POETRY_BIN=$POETRY_BIN" >> "$GITHUB_ENV"
+          echo "$(dirname "$POETRY_BIN")" >> "$GITHUB_PATH"
+
+      - name: Install project dependencies (x86_64)
+        working-directory: source
+        run: |
+          arch -x86_64 "$PYBIN" -m poetry install --no-interaction --no-ansi
+
+      - name: Build credential-process-macos-intel
+        working-directory: source
+        run: |
+          mkdir -p /tmp/macos-intel-binaries
+          # No --target-arch needed: arch=x86_64 is set by the interpreter itself
+          arch -x86_64 "$PYBIN" -m poetry run pyinstaller \
+            --onefile \
+            --clean \
+            --noconfirm \
+            --name=credential-process-macos-intel \
+            --distpath=/tmp/macos-intel-binaries \
+            --workpath=/tmp/pyinstaller/credential-process \
+            --specpath=/tmp/pyinstaller/credential-process \
+            --log-level=WARN \
+            --hidden-import=keyring.backends.macOS \
+            --hidden-import=keyring.backends.SecretService \
+            --hidden-import=keyring.backends.Windows \
+            --hidden-import=keyring.backends.chainer \
+            --hidden-import=claude_code_with_bedrock.models \
+            credential_provider/__main__.py
+
+      - name: Build otel-helper-macos-intel
+        working-directory: source
+        run: |
+          arch -x86_64 "$PYBIN" -m poetry run pyinstaller \
+            --onefile \
+            --clean \
+            --noconfirm \
+            --name=otel-helper-macos-intel \
+            --distpath=/tmp/macos-intel-binaries \
+            --workpath=/tmp/pyinstaller/otel-helper \
+            --specpath=/tmp/pyinstaller/otel-helper \
+            --log-level=WARN \
+            otel_helper/__main__.py
+
+      - name: Verify Intel binaries
+        run: |
+          echo "=== Built Intel binaries ==="
+          ls -lh /tmp/macos-intel-binaries/
+          file /tmp/macos-intel-binaries/credential-process-macos-intel
+          file /tmp/macos-intel-binaries/otel-helper-macos-intel
+
+      - name: Upload macOS Intel binaries artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-intel-binaries-${{ github.sha }}
+          path: /tmp/macos-intel-binaries/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Commit Intel binaries to source/binaries/
+        run: |
+          set -e
+          BRANCH="${{ inputs.ref || github.ref_name }}"
+          echo "Committing macOS Intel binaries to source/binaries/ on branch ${BRANCH}"
+
+          # Pull latest first — arm64 job may have already pushed a commit
+          git fetch origin "${BRANCH}"
+          git reset --hard "origin/${BRANCH}"
+
+          mkdir -p source/binaries
+          cp /tmp/macos-intel-binaries/credential-process-macos-intel source/binaries/
+          cp /tmp/macos-intel-binaries/otel-helper-macos-intel source/binaries/
+          chmod +x source/binaries/credential-process-macos-intel
+          chmod +x source/binaries/otel-helper-macos-intel
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "GitHub Actions"
+
+          git add source/binaries/credential-process-macos-intel
+          git add source/binaries/otel-helper-macos-intel
+
+          if git diff --staged --quiet; then
+            echo "No binary changes detected — skipping commit"
+          else
+            SIZE_CP=$(wc -c < source/binaries/credential-process-macos-intel | tr -d ' ')
+            SIZE_OH=$(wc -c < source/binaries/otel-helper-macos-intel | tr -d ' ')
+            git commit -m "ci: update macOS Intel binaries [run ${{ github.run_id }}] from ${BRANCH} (cp: $((SIZE_CP / 1024))KB, otel: $((SIZE_OH / 1024))KB)"
+            git push origin "HEAD:${BRANCH}"
+            echo "✓ macOS Intel binaries committed and pushed to ${BRANCH}"
+          fi
+

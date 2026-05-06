@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Claude Code with Bedrock - Landing Page for package downloads (Regional + Entra ID auth)'
+
+Parameters:
+  DistributionBucketName:
+    Type: String
+    Default: claude-code-distribution-308657715154
+    Description: S3 bucket containing distribution packages
+
+  PresignedUrlExpiration:
+    Type: Number
+    Default: 3600
+    Description: Presigned URL expiration in seconds (default 1 hour)
+
+  KmsKeyArn:
+    Type: String
+    Default: arn:aws:kms:eu-central-1:767828738298:key/mrk-c24cc550342c4511a2470ad1e0ff7fcf
+    Description: KMS key ARN used for bucket encryption
+
+  AzureTenantId:
+    Type: String
+    Default: 761de76f-3d5c-4174-917c-5ad4d06360cb
+    Description: Azure AD / Entra ID tenant ID
+
+  AzureClientId:
+    Type: String
+    Default: 97c4d1b5-7c46-4bff-b6cf-d93898635821
+    Description: Azure AD / Entra ID application (client) ID
+
+Resources:
+  LandingPageFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ClaudeCode-LandingPage
+      Description: Serves login page and package download links
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 15
+      MemorySize: 128
+      Role: !GetAtt LandingPageRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DistributionBucketName
+          URL_EXPIRATION: !Ref PresignedUrlExpiration
+          AZURE_TENANT_ID: !Ref AzureTenantId
+          AZURE_CLIENT_ID: !Ref AzureClientId
+      Code:
+        S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+        S3Key: claude-code/landing-page/function.zip
+
+  LandingPageRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ClaudeCode-LandingPage-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DistributionBucketName}'
+                  - !Sub 'arn:aws:s3:::${DistributionBucketName}/packages/*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource:
+                  - !Ref KmsKeyArn
+
+  LandingPageLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ClaudeCode-LandingPage
+      RetentionInDays: 7
+
+  LandingPageApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: ClaudeCode-LandingPage
+      Description: Regional API for Claude Code package distribution with Entra ID auth
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - OPTIONS
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+
+  LandingPageAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref LandingPageApi
+      AuthorizerType: JWT
+      Name: EntraIdAuthorizer
+      IdentitySource:
+        - '$request.header.Authorization'
+      JwtConfiguration:
+        Audience:
+          - !Ref AzureClientId
+        Issuer: !Sub 'https://login.microsoftonline.com/${AzureTenantId}/v2.0'
+
+  LandingPageIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref LandingPageApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt LandingPageFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  LoginRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref LandingPageApi
+      RouteKey: 'GET /'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${LandingPageIntegration}'
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref LandingPageApi
+      RouteKey: '$default'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${LandingPageIntegration}'
+
+  PackagesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref LandingPageApi
+      RouteKey: 'GET /packages'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref LandingPageAuthorizer
+      Target: !Sub 'integrations/${LandingPageIntegration}'
+
+  LandingPageStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref LandingPageApi
+      StageName: prod
+      AutoDeploy: true
+
+  LambdaApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LandingPageFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${LandingPageApi}/*'
+
+Outputs:
+  LandingPageUrl:
+    Description: URL for the package distribution landing page
+    Value: !Sub 'https://${LandingPageApi}.execute-api.${AWS::Region}.amazonaws.com/prod'

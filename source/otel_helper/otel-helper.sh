@@ -1,7 +1,7 @@
 #!/bin/bash
 # ABOUTME: Lightweight shell wrapper for otel-helper that checks file cache first
 # ABOUTME: Avoids PyInstaller binary startup (~6s) on cache hit, falls back to full binary on miss
-PROFILE="${AWS_PROFILE:-ClaudeCode}"
+PROFILE="${AWS_PROFILE:-claude-code-default}"
 CACHE_DIR="$HOME/.claude-code-session"
 CACHE_FILE="$CACHE_DIR/${PROFILE}-otel-headers.json"
 RAW_FILE="$CACHE_DIR/${PROFILE}-otel-headers.raw"

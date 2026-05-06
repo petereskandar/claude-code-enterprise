@@ -58,7 +58,7 @@ services:
         echo "1. Create a test directory: mkdir /test && cd /test"
         echo "2. Copy installer files: cp -r /package/* ."
         echo "3. Run installer: ./install.sh"
-        echo "4. Test auth: export AWS_PROFILE=ClaudeCode && aws sts get-caller-identity"
+        echo "4. Test auth: export AWS_PROFILE=claude-code-default && aws sts get-caller-identity"
         echo
         exec bash
       '

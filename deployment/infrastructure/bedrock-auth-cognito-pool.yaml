@@ -65,6 +65,11 @@ Parameters:
       When true, users can ONLY invoke Bedrock via their own Application Inference Profiles.
       Direct access to foundation models and cross-region inference profiles is denied.
 
+  InferenceProfileMappingTableName:
+    Type: String
+    Default: 'InferenceProfileMapping'
+    Description: Name of the DynamoDB table that maps inference profile ARNs to user email/model
+
 Conditions:
   UseDirectIAM: !Equals [!Ref FederationType, direct]
   UseCognitoIdentity: !Equals [!Ref FederationType, cognito]
@@ -166,7 +171,7 @@ Resources:
           # Statement 2: allow invoke on underlying foundation/system models, but ONLY when the
           # call originates from an application inference profile in this account (cross-region routing).
           # Resources enumerate every foundation-model ARN reachable by the EU and US cross-region
-          # inference profiles for the three enabled models (opus-4-6, sonnet-4-6, haiku-4-5).
+          # inference profiles for the three enabled models (opus-4-7, sonnet-4-6, haiku-4-5).
           - !If
             - UseInferenceProfiles
             - Sid: AllowBedrockInvokeFoundationModelViaInferenceProfile
@@ -180,40 +185,40 @@ Resources:
                 - 'bedrock-runtime:Converse'
               Resource:
                 # EU cross-region inference profile system ARNs
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::inference-profile/eu.anthropic.claude-haiku-4-5-20251001-v1:0'
                 # US cross-region inference profile system ARNs
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0'
                 # EU foundation-model ARNs (destination regions for eu.* profiles)
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-north-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-south-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:eu-west-3::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
                 # US foundation-model ARNs (destination regions for us.* profiles)
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-east-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
-                - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-opus-4-6-v1'
+                - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-opus-4-7'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-6'
                 - !Sub 'arn:${AWS::Partition}:bedrock:us-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0'
               Condition:
@@ -256,6 +261,11 @@ Resources:
               - 'bedrock:GetFoundationModelAvailability'
               - 'bedrock:ListInferenceProfiles'
               - 'bedrock:GetInferenceProfile'
+            Resource: '*'
+          - Sid: AllowBedrockCallWithBearerToken
+            Effect: Allow
+            Action:
+              - 'bedrock:CallWithBearerToken'
             Resource: '*'
           - !If
             - MonitoringEnabled
@@ -492,9 +502,60 @@ Resources:
                 Condition:
                   StringEquals:
                     'aws:RequestedRegion': !Ref AllowedBedrockRegions
+              # Write to InferenceProfileMapping DynamoDB table
+              - Sid: AllowDynamoDBMapping
+                Effect: Allow
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:GetItem'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${InferenceProfileMappingTableName}'
+              # Read SSM parameter for user groups mapping
+              - Sid: AllowSSMReadGroups
+                Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/claude-code/user-groups'
       Tags:
         - Key: Purpose
           Value: Claude Code Inference Profile Provisioner
+
+  InferenceProfileModelsParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseInferenceProfiles
+    Properties:
+      Name: '/claude-code/inference-profile-models'
+      Type: String
+      Description: >-
+        JSON configuration for Bedrock inference profile models.
+        Update this parameter to add/remove/change models without redeploying the Lambda.
+      Value: !Sub |
+        {
+          "opus-4-7":   {"cross_region_profile_id": "{geo}.anthropic.claude-opus-4-7",             "enabled": true},
+          "sonnet-4-6": {"cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",           "enabled": true},
+          "haiku-4-5":  {"cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0", "enabled": true}
+        }
+      Tags:
+        Purpose: Claude Code Inference Profile Models
+
+  UserGroupsParameter:
+    Type: AWS::SSM::Parameter
+    Condition: UseInferenceProfiles
+    Properties:
+      Name: '/claude-code/user-groups'
+      Type: String
+      Description: >-
+        Mapping of Entra ID group GUIDs to group names for Claude Code access tiers.
+        Update this parameter to add/remove groups without redeploying the Lambda.
+      Value: |
+        {
+          "9f0c1c65-3a5b-497c-b0cb-35aa6a20e2b1": "AWSClaudeCodePowerUsers",
+          "cd356a8c-3361-4a27-b855-3b2c9b831da9": "AWSClaudeCodeStandardUsers",
+          "aa191b61-f9dd-44ce-a251-c7c244ddb902": "AWSClaudeCodeBasicUsers"
+        }
+      Tags:
+        Purpose: Claude Code User Group Mapping
 
   InferenceProfileProvisionerLogGroup:
     Type: AWS::Logs::LogGroup
@@ -510,9 +571,9 @@ Resources:
     Properties:
       FunctionName: 'ClaudeCode-InferenceProfileProvisioner'
       Description: >-
-        Provisions Bedrock Application Inference Profiles for authenticated users.
-        Sole principal with bedrock:CreateInferenceProfile — users invoke this instead
-        of calling the Bedrock management plane directly.
+        Provisions per-user Bedrock Application Inference Profiles.
+        Model config from SSM /claude-code/inference-profile-models.
+        Resolves user groups from JWT via SSM /claude-code/user-groups.
       Runtime: python3.12
       Handler: index.handler
       Role: !GetAtt InferenceProfileProvisionerRole.Arn
@@ -520,72 +581,13 @@ Resources:
       MemorySize: 128
       LoggingConfig:
         LogGroup: '/aws/lambda/ClaudeCode-InferenceProfileProvisioner'
+      Environment:
+        Variables:
+          INFERENCE_PROFILE_MODELS_JSON: !GetAtt InferenceProfileModelsParameter.Value
+          INFERENCE_PROFILE_MAPPING_TABLE: !Ref InferenceProfileMappingTableName
       Code:
-        ZipFile: |
-          import json, logging, re, hashlib, boto3
-          from botocore.exceptions import ClientError
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-          _EU_REGIONS = {"eu-west-1","eu-west-2","eu-west-3","eu-central-1","eu-central-2","eu-north-1","eu-south-1","eu-south-2"}
-          INFERENCE_PROFILE_MODELS = {
-            "opus-4-6":  {"cross_region_profile_id": "{geo}.anthropic.claude-opus-4-6-v1",            "enabled": True},
-            "sonnet-4-6":{"cross_region_profile_id": "{geo}.anthropic.claude-sonnet-4-6",             "enabled": True},
-            "haiku-4-5": {"cross_region_profile_id": "{geo}.anthropic.claude-haiku-4-5-20251001-v1:0","enabled": True},
-          }
-          _MAX_TAG_VALUE = 256
-          _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-          def _geo(region): return "eu" if region in _EU_REGIONS else "us"
-          def _source_arn(model_key, region):
-            e = INFERENCE_PROFILE_MODELS[model_key]
-            pid = e["cross_region_profile_id"].format(geo=_geo(region))
-            return f"arn:aws:bedrock:{region}::inference-profile/{pid}"
-          def _profile_name(email, model_key):
-            h = hashlib.sha256(email.encode()).hexdigest()[:8]
-            s = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", email.lower())).strip("-")
-            suffix = f"-{h}-{model_key}"
-            return f"claude-code-{s[:64-12-len(suffix)]}{suffix}"
-          def _tags(email, claims):
-            tags = [{"key":"user.email","value":email[:_MAX_TAG_VALUE]}]
-            for ck, tk in [("custom:cost_center","cost_center"),("custom:department","department"),("custom:organization","organization"),("custom:team","team")]:
-              v = claims.get(ck)
-              if v: tags.append({"key":tk,"value":str(v)[:_MAX_TAG_VALUE]})
-            return tags
-          def handler(event, context):
-            region = boto3.session.Session().region_name
-            bedrock = boto3.client("bedrock", region_name=region)
-            email = (event.get("email") or "").strip()
-            if not email or not _EMAIL_RE.match(email):
-              logger.error("Invalid or missing email: %r", email)
-              return {"statusCode":400,"body":json.dumps({"error":"Invalid or missing email in payload"})}
-            claims = event.get("claims") or {}
-            tags = _tags(email, claims)
-            arns = {}
-            enabled = {k:v for k,v in INFERENCE_PROFILE_MODELS.items() if v.get("enabled")}
-            expected = {_profile_name(email, mk): mk for mk in enabled}
-            try:
-              pg = bedrock.get_paginator("list_inference_profiles")
-              for page in pg.paginate(typeEquals="APPLICATION"):
-                for p in page.get("inferenceProfileSummaries",[]):
-                  pn = p.get("inferenceProfileName","")
-                  if pn in expected:
-                    arns[expected[pn]] = p["inferenceProfileArn"]
-                    logger.info("Found existing '%s': %s", expected[pn], p["inferenceProfileArn"])
-            except Exception as e: logger.warning("Could not list profiles: %s", e)
-            if all(mk in arns for mk in enabled):
-              logger.info("All %d profiles exist for %s", len(arns), email)
-              return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
-            for mk in enabled:
-              if mk in arns: continue
-              pname = _profile_name(email, mk)
-              logger.info("Creating profile '%s' for '%s'", pname, mk)
-              try:
-                r = bedrock.create_inference_profile(inferenceProfileName=pname, description="Claude Code inference profile", modelSource={"copyFrom":_source_arn(mk,region)}, tags=tags)
-                arns[mk] = r["inferenceProfileArn"]
-                logger.info("Created '%s': %s", mk, arns[mk])
-              except ClientError as e: logger.warning("Could not create profile for '%s': %s", mk, e)
-              except Exception as e: logger.warning("Unexpected error for '%s': %s", mk, e)
-            logger.info("Returning %d ARN(s) for %s", len(arns), email)
-            return {"statusCode":200,"body":json.dumps({"profile_arns":arns})}
+        S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+        S3Key: claude-code/provisioner/index.zip
       Tags:
         - Key: Purpose
           Value: Claude Code Inference Profile Provisioner

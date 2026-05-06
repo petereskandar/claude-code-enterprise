@@ -13,14 +13,16 @@ from decimal import Decimal
 logs_client = boto3.client("logs")
 cloudwatch_client = boto3.client("cloudwatch")
 dynamodb = boto3.resource("dynamodb")
+ssm_client = boto3.client("ssm")
 
 # Configuration
 NAMESPACE = "ClaudeCode"
 LOG_GROUP = os.environ.get("METRICS_LOG_GROUP", "/aws/lambda/bedrock-claude-logs")
 METRICS_TABLE = os.environ.get("METRICS_TABLE", "ClaudeCodeMetrics")
-QUOTA_TABLE = os.environ.get("QUOTA_TABLE")  # Optional - only set if quota monitoring is enabled
-POLICIES_TABLE = os.environ.get("POLICIES_TABLE")  # Optional - for fine-grained quotas
+QUOTA_TABLE = os.environ.get("QUOTA_TABLE")
+POLICIES_TABLE = os.environ.get("POLICIES_TABLE")
 ENABLE_FINEGRAINED_QUOTAS = os.environ.get("ENABLE_FINEGRAINED_QUOTAS", "false").lower() == "true"
+PRICING_PARAM_NAME = os.environ.get("PRICING_PARAM_NAME")
 AGGREGATION_WINDOW = 5  # minutes
 
 # DynamoDB tables
@@ -28,15 +30,66 @@ table = dynamodb.Table(METRICS_TABLE)
 quota_table = dynamodb.Table(QUOTA_TABLE) if QUOTA_TABLE else None
 policies_table = dynamodb.Table(POLICIES_TABLE) if POLICIES_TABLE else None
 
-
 CURSOR_SK = "CURSOR#AGGREGATOR"
+
+# Cached pricing data (loaded once per Lambda cold start)
+_PRICING_DATA = None
+
+
+def _load_pricing() -> dict:
+    """Load model pricing from SSM Parameter Store. Cached per cold start."""
+    global _PRICING_DATA
+    if _PRICING_DATA is not None:
+        return _PRICING_DATA
+
+    if not PRICING_PARAM_NAME:
+        print("PRICING_PARAM_NAME not set - cost calculation disabled")
+        _PRICING_DATA = {}
+        return _PRICING_DATA
+
+    try:
+        resp = ssm_client.get_parameter(Name=PRICING_PARAM_NAME)
+        _PRICING_DATA = json.loads(resp["Parameter"]["Value"])
+        print(f"Loaded pricing for {len(_PRICING_DATA.get('models', {}))} model(s)")
+    except Exception as e:
+        print(f"Warning: could not load pricing from SSM: {e}")
+        _PRICING_DATA = {}
+    return _PRICING_DATA
+
+
+def _cost_for_tokens(model: str, input_t: float, output_t: float,
+                     cache_read_t: float, cache_write_t: float) -> float:
+    """Calculate USD cost for a set of token counts using model pricing."""
+    pricing = _load_pricing()
+    if not pricing:
+        return 0.0
+
+    models = pricing.get("models", {})
+    default = pricing.get("default", {})
+
+    # Try exact match first, then partial match on model name
+    rates = models.get(model)
+    if not rates:
+        for key in models:
+            if key in model or model in key:
+                rates = models[key]
+                break
+    if not rates:
+        rates = default
+    if not rates:
+        return 0.0
+
+    cost = (
+        input_t * rates.get("input_per_million", 0) / 1_000_000
+        + output_t * rates.get("output_per_million", 0) / 1_000_000
+        + cache_read_t * rates.get("cache_read_per_million", 0) / 1_000_000
+        + cache_write_t * rates.get("cache_write_per_million", 0) / 1_000_000
+    )
+    return cost
 
 
 def _read_high_water_mark(default_end: datetime) -> datetime:
-    """Read the last-processed timestamp from DynamoDB.
-
-    Returns the stored timestamp, or *default_end* minus 10 minutes on first run.
-    """
+    """Read the last-processed timestamp from DynamoDB."""
     try:
         resp = table.get_item(Key={"pk": "METRICS", "sk": CURSOR_SK})
         item = resp.get("Item")
@@ -63,96 +116,68 @@ def _write_high_water_mark(ts: datetime) -> None:
 def lambda_handler(event, context):
     """
     Aggregate logs incrementally using a high-water mark stored in DynamoDB.
-    
-    On each run the aggregator reads the last-processed timestamp from DynamoDB,
-    queries the log group from that point to now, writes results, then advances
-    the marker.  This eliminates timing races with the BedrockMetricsBridge and
-    guarantees exactly-once processing with no double-counting.
     """
     print(f"Starting metrics aggregation for log group: {LOG_GROUP}")
 
-    # Read high-water mark from DynamoDB (or default to 10 minutes ago on first run)
     end_time = datetime.now(timezone.utc)
     start_time = _read_high_water_mark(end_time)
 
-    # CloudWatch Logs filter_log_events uses milliseconds; Logs Insights uses seconds
-    start_ms = int(start_time.timestamp() * 1000)   # for filter_log_events
-    end_ms = int(end_time.timestamp() * 1000)         # for filter_log_events
-    start_sec = int(start_time.timestamp())            # for Logs Insights start_query
-    end_sec = int(end_time.timestamp())                # for Logs Insights start_query
+    start_sec = int(start_time.timestamp())
+    end_sec = int(end_time.timestamp())
 
     try:
-        # Collect all metrics
         metrics_to_publish = []
 
         # 1. Total Tokens
         total_tokens = aggregate_total_tokens(start_sec, end_sec)
         if total_tokens is not None:
-            metrics_to_publish.append(
-                {
-                    "MetricName": "TotalTokens",
-                    "Value": total_tokens,
-                    "Unit": "Count",
-                    "Timestamp": end_time,
-                }
-            )
+            metrics_to_publish.append({
+                "MetricName": "TotalTokens",
+                "Value": total_tokens,
+                "Unit": "Count",
+                "Timestamp": end_time,
+            })
 
-        # 2. Active Users (now returns count and details)
+        # 2. Active Users (returns count and details with per-model breakdown)
         active_users_count, user_details = aggregate_active_users(start_sec, end_sec)
         if active_users_count is not None:
-            metrics_to_publish.append(
-                {
-                    "MetricName": "ActiveUsers",
-                    "Value": active_users_count,
-                    "Unit": "Count",
-                    "Timestamp": end_time,
-                }
-            )
+            metrics_to_publish.append({
+                "MetricName": "ActiveUsers",
+                "Value": active_users_count,
+                "Unit": "Count",
+                "Timestamp": end_time,
+            })
 
         # 3. Lines of Code Added/Removed
-        line_events, lines_added, lines_removed = aggregate_lines_of_code(
-            start_sec, end_sec
-        )
+        line_events, lines_added, lines_removed = aggregate_lines_of_code(start_sec, end_sec)
 
-        # 3b. Model Rate Metrics (per-minute TPM/RPM)
+        # 3b. Model Rate Metrics
         model_rate_metrics = aggregate_model_rate_metrics(start_sec, end_sec)
 
         # Write to DynamoDB
         write_to_dynamodb(
-            end_time,
-            total_tokens,
-            active_users_count,
-            user_details,
-            lines_added,
-            lines_removed,
-            line_events,
-            model_rate_metrics,
+            end_time, total_tokens, active_users_count, user_details,
+            lines_added, lines_removed, line_events, model_rate_metrics,
         )
 
-        # Update quota tracking (only if quota monitoring is enabled)
+        # Update quota tracking
         if quota_table:
             update_quota_table(end_time, user_details)
         else:
             print("Quota monitoring not enabled - skipping quota table updates")
 
-        # Always publish lines metrics to CloudWatch (even if 0)
-        metrics_to_publish.append(
-            {
-                "MetricName": "LinesAdded",
-                "Value": lines_added,
-                "Unit": "Count",
-                "Timestamp": end_time,
-            }
-        )
-
-        metrics_to_publish.append(
-            {
-                "MetricName": "LinesRemoved",
-                "Value": lines_removed,
-                "Unit": "Count",
-                "Timestamp": end_time,
-            }
-        )
+        metrics_to_publish.append({
+            "MetricName": "LinesAdded",
+            "Value": lines_added,
+            "Unit": "Count",
+            "Timestamp": end_time,
+        })
+        metrics_to_publish.append({
+            "MetricName": "LinesRemoved",
+            "Value": lines_removed,
+            "Unit": "Count",
+            "Timestamp": end_time,
+        })
 
         # 4. Cache Metrics
         cache_metrics = aggregate_cache_metrics(start_sec, end_sec)
@@ -177,26 +202,21 @@ def lambda_handler(event, context):
         # 8. Commits
         commit_count = aggregate_commits(start_sec, end_sec)
         if commit_count is not None:
-            metrics_to_publish.append(
-                {
-                    "MetricName": "Commits",
-                    "Value": commit_count,
-                    "Unit": "Count",
-                    "Timestamp": end_time,
-                }
-            )
+            metrics_to_publish.append({
+                "MetricName": "Commits",
+                "Value": commit_count,
+                "Unit": "Count",
+                "Timestamp": end_time,
+            })
 
         # Publish metrics in batches (max 20 per request)
         for i in range(0, len(metrics_to_publish), 20):
-            batch = metrics_to_publish[i : i + 20]
+            batch = metrics_to_publish[i:i + 20]
             cloudwatch_client.put_metric_data(Namespace=NAMESPACE, MetricData=batch)
             print(f"Published {len(batch)} metrics to CloudWatch")
 
-        print(
-            f"Successfully aggregated and published {len(metrics_to_publish)} metrics"
-        )
+        print(f"Successfully aggregated and published {len(metrics_to_publish)} metrics")
 
-        # Advance the high-water mark so the next run starts where we left off
         _write_high_water_mark(end_time)
 
         return {
@@ -210,10 +230,7 @@ def lambda_handler(event, context):
 
 
 def run_query(query, start_sec, end_sec):
-    """
-    Run a CloudWatch Logs Insights query and wait for results.
-    start_sec / end_sec must be Unix timestamps in SECONDS (not milliseconds).
-    """
+    """Run a CloudWatch Logs Insights query and wait for results."""
     try:
         print(f"run_query: startTime={start_sec} endTime={end_sec} ({datetime.fromtimestamp(start_sec, tz=timezone.utc).isoformat()} -> {datetime.fromtimestamp(end_sec, tz=timezone.utc).isoformat()})")
         response = logs_client.start_query(
@@ -225,7 +242,6 @@ def run_query(query, start_sec, end_sec):
 
         query_id = response["queryId"]
 
-        # Wait for query to complete (max 30 seconds)
         for _ in range(30):
             response = logs_client.get_query_results(queryId=query_id)
             status = response["status"]
@@ -249,9 +265,7 @@ def run_query(query, start_sec, end_sec):
 
 
 def aggregate_total_tokens(start_ms, end_ms):
-    """
-    Aggregate total token usage.
-    """
+    """Aggregate total token usage."""
     query = """
     fields @message
     | filter @message like /claude_code.token.usage/
@@ -269,10 +283,11 @@ def aggregate_total_tokens(start_ms, end_ms):
 
 def aggregate_active_users(start_ms, end_ms):
     """
-    Count distinct active users and return user details with token type breakdown.
-    Also extracts JWT group claims for fine-grained quota support.
+    Count distinct active users and return user details with per-model,
+    per-token-type breakdown including cache_read and cache_write separately.
+    Also extracts user.group from EMF records.
     """
-    # First get unique count for CloudWatch metric
+    # Unique count for CloudWatch metric
     query_count = """
     fields @message
     | filter @message like /user.email/
@@ -287,42 +302,68 @@ def aggregate_active_users(start_ms, end_ms):
             if field["field"] == "active_users":
                 unique_count = int(float(field["value"]))
 
-    # Get user details with token type breakdown for cost calculation
-    # This query extracts input, output, and cache tokens separately
-    query_details = """
+    # Per-user, per-model, per-token-type breakdown
+    # Split into 4 queries by token type to stay well under the 10k row limit
+    # (supports up to ~2500 user*model combinations per type = ~830 users * 3 models)
+    token_types_queries = {
+        "input": """
     fields @message
-    | filter @message like /user.email/
+    | filter @message like /user.email/ and @message like /"type":"input"/
     | parse @message /"user.email":"(?<user>[^"]*)"/
     | parse @message /"claude_code.token.usage":(?<tokens>[0-9.]+)/
-    | parse @message /"type":"(?<token_type>[^"]*)"/
     | parse @message /"model":"(?<model>[^"]*)"/
-    | stats sum(tokens) as total_tokens, count() as requests by user, token_type, model
-    | sort user asc
-    """
+    | stats sum(tokens) as total_tokens, count() as requests by user, model
+    """,
+        "output": """
+    fields @message
+    | filter @message like /user.email/ and @message like /"type":"output"/
+    | parse @message /"user.email":"(?<user>[^"]*)"/
+    | parse @message /"claude_code.token.usage":(?<tokens>[0-9.]+)/
+    | parse @message /"model":"(?<model>[^"]*)"/
+    | stats sum(tokens) as total_tokens, count() as requests by user, model
+    """,
+        "cacheRead": """
+    fields @message
+    | filter @message like /user.email/ and @message like /"type":"cacheRead"/
+    | parse @message /"user.email":"(?<user>[^"]*)"/
+    | parse @message /"claude_code.token.usage":(?<tokens>[0-9.]+)/
+    | parse @message /"model":"(?<model>[^"]*)"/
+    | stats sum(tokens) as total_tokens, count() as requests by user, model
+    """,
+        "cacheCreation": """
+    fields @message
+    | filter @message like /user.email/ and @message like /"type":"cacheCreation"/
+    | parse @message /"user.email":"(?<user>[^"]*)"/
+    | parse @message /"claude_code.token.usage":(?<tokens>[0-9.]+)/
+    | parse @message /"model":"(?<model>[^"]*)"/
+    | stats sum(tokens) as total_tokens, count() as requests by user, model
+    """,
+    }
 
-    # Aggregate by user, collecting token types
+    # Structure: { email: { "tokens": N, "requests": N, "models": { model: { input, output, cache_read, cache_write } } } }
     user_data = {}
-    results = run_query(query_details, start_ms, end_ms)
-    for result in results:
-        user_email = None
-        tokens = 0
-        requests = 0
-        token_type = None
-        model = None
 
-        for field in result:
-            if field["field"] == "user":
-                user_email = field["value"]
-            elif field["field"] == "total_tokens":
-                tokens = float(field["value"])
-            elif field["field"] == "requests":
-                requests = int(float(field["value"]))
-            elif field["field"] == "token_type":
-                token_type = field["value"]
-            elif field["field"] == "model":
-                model = field["value"]
+    for token_type, query in token_types_queries.items():
+        results = run_query(query, start_ms, end_ms)
+        for result in results:
+            user_email = None
+            tokens = 0
+            requests = 0
+            model = None
 
-        if user_email:
+            for field in result:
+                if field["field"] == "user":
+                    user_email = field["value"]
+                elif field["field"] == "total_tokens":
+                    tokens = float(field["value"])
+                elif field["field"] == "requests":
+                    requests = int(float(field["value"]))
+                elif field["field"] == "model":
+                    model = field["value"]
+
+            if not user_email or tokens <= 0:
+                continue
+
             if user_email not in user_data:
                 user_data[user_email] = {
                     "email": user_email,
@@ -330,92 +371,83 @@ def aggregate_active_users(start_ms, end_ms):
                     "requests": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
-                    "cache_tokens": 0,
-                    "model": model,  # Track last model used
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "models": {},
                 }
 
-            user_data[user_email]["tokens"] += tokens
+            ud = user_data[user_email]
+            ud["tokens"] += tokens
 
-            # Track token types for cost calculation
             if token_type == "input":
-                user_data[user_email]["input_tokens"] += tokens
-                user_data[user_email]["requests"] += requests  # Count requests only for input
+                ud["input_tokens"] += tokens
+                ud["requests"] += requests
             elif token_type == "output":
-                user_data[user_email]["output_tokens"] += tokens
-            elif token_type in ("cacheRead", "cache_read"):
-                user_data[user_email]["cache_tokens"] += tokens
+                ud["output_tokens"] += tokens
+            elif token_type == "cacheRead":
+                ud["cache_read_tokens"] += tokens
+            elif token_type == "cacheCreation":
+                ud["cache_write_tokens"] += tokens
 
-            # Keep track of model (use latest)
+            # Per-model breakdown
             if model:
-                user_data[user_email]["model"] = model
+                if model not in ud["models"]:
+                    ud["models"][model] = {
+                        "input": 0, "output": 0,
+                        "cache_read": 0, "cache_write": 0,
+                    }
+                md = ud["models"][model]
+                if token_type == "input":
+                    md["input"] += tokens
+                elif token_type == "output":
+                    md["output"] += tokens
+                elif token_type == "cacheRead":
+                    md["cache_read"] += tokens
+                elif token_type == "cacheCreation":
+                    md["cache_write"] += tokens
 
-    # Query for JWT group claims (groups, cognito:groups, custom:department)
-    if ENABLE_FINEGRAINED_QUOTAS:
-        query_groups = """
-        fields @message
-        | filter @message like /user.email/
-        | parse @message /"user.email":"(?<user>[^"]*)"/
-        | parse @message /"groups":\\[(?<groups>[^\\]]*)\\]/
-        | parse @message /"cognito:groups":\\[(?<cognito_groups>[^\\]]*)\\]/
-        | parse @message /"custom:department":"(?<department>[^"]*)"/
-        | stats latest(groups) as groups, latest(cognito_groups) as cognito_groups, latest(department) as department by user
-        """
+    # Calculate cost per user using per-model pricing
+    for email, ud in user_data.items():
+        total_cost = 0.0
+        for model, md in ud["models"].items():
+            total_cost += _cost_for_tokens(
+                model, md["input"], md["output"],
+                md["cache_read"], md["cache_write"],
+            )
+        ud["cost"] = total_cost
 
-        results = run_query(query_groups, start_ms, end_ms)
-        for result in results:
-            user_email = None
-            groups_str = None
-            cognito_groups_str = None
-            department = None
+    # Query for user.group from EMF logs
+    query_groups = """
+    fields @message
+    | filter @message like /user.email/ and @message like /user.group/
+    | parse @message /"user.email":"(?<uemail>[^"]*)"/
+    | parse @message /"user.group":"(?<ugrp>[^"]*)"/
+    | stats latest(ugrp) as latest_grp by uemail
+    """
 
-            for field in result:
-                if field["field"] == "user":
-                    user_email = field["value"]
-                elif field["field"] == "groups":
-                    groups_str = field["value"]
-                elif field["field"] == "cognito_groups":
-                    cognito_groups_str = field["value"]
-                elif field["field"] == "department":
-                    department = field["value"]
+    results = run_query(query_groups, start_ms, end_ms)
+    for result in results:
+        user_email = None
+        user_group = None
+        for field in result:
+            if field["field"] == "uemail":
+                user_email = field["value"]
+            elif field["field"] == "latest_grp":
+                user_group = field["value"]
+        if user_email and user_group and user_email in user_data:
+            user_data[user_email]["groups"] = [user_group]
 
-            if user_email and user_email in user_data:
-                # Parse and combine all group sources
-                all_groups = set()
-
-                # Parse groups array (format: "group1","group2")
-                if groups_str:
-                    for g in groups_str.replace('"', '').split(','):
-                        g = g.strip()
-                        if g:
-                            all_groups.add(g)
-
-                # Parse cognito:groups array
-                if cognito_groups_str:
-                    for g in cognito_groups_str.replace('"', '').split(','):
-                        g = g.strip()
-                        if g:
-                            all_groups.add(g)
-
-                # Add department as a group
-                if department:
-                    all_groups.add(department)
-
-                user_data[user_email]["groups"] = list(all_groups)
-
-    # Convert to list and sort by tokens
+    # Convert to list sorted by tokens
     user_details = sorted(user_data.values(), key=lambda x: x["tokens"], reverse=True)
 
     return unique_count, user_details
 
 
 def aggregate_cache_metrics(start_ms, end_ms):
-    """
-    Aggregate cache hit/miss metrics and token type metrics.
-    """
+    """Aggregate cache hit/miss metrics and token type metrics."""
     metrics = []
     timestamp = datetime.now(timezone.utc)
 
-    # Query for all token types including input, output, cache
     query = """
     fields @message
     | filter @message like /claude_code.token.usage/
@@ -437,45 +469,15 @@ def aggregate_cache_metrics(start_ms, end_ms):
                 total = float(field["value"])
 
         if token_type and total > 0:
-            # Map token types to metric names
             if token_type == "input":
-                metrics.append(
-                    {
-                        "MetricName": "InputTokens",
-                        "Value": total,
-                        "Unit": "Count",
-                        "Timestamp": timestamp,
-                    }
-                )
+                metrics.append({"MetricName": "InputTokens", "Value": total, "Unit": "Count", "Timestamp": timestamp})
             elif token_type == "output":
-                metrics.append(
-                    {
-                        "MetricName": "OutputTokens",
-                        "Value": total,
-                        "Unit": "Count",
-                        "Timestamp": timestamp,
-                    }
-                )
+                metrics.append({"MetricName": "OutputTokens", "Value": total, "Unit": "Count", "Timestamp": timestamp})
             elif token_type == "cacheRead":
-                metrics.append(
-                    {
-                        "MetricName": "CacheReadTokens",
-                        "Value": total,
-                        "Unit": "Count",
-                        "Timestamp": timestamp,
-                    }
-                )
+                metrics.append({"MetricName": "CacheReadTokens", "Value": total, "Unit": "Count", "Timestamp": timestamp})
             elif token_type == "cacheCreation":
-                metrics.append(
-                    {
-                        "MetricName": "CacheCreationTokens",
-                        "Value": total,
-                        "Unit": "Count",
-                        "Timestamp": timestamp,
-                    }
-                )
+                metrics.append({"MetricName": "CacheCreationTokens", "Value": total, "Unit": "Count", "Timestamp": timestamp})
 
-    # Calculate cache efficiency if we have cache metrics
     cache_read_tokens = 0
     cache_creation_tokens = 0
     for metric in metrics:
@@ -487,22 +489,13 @@ def aggregate_cache_metrics(start_ms, end_ms):
     total_cache = cache_read_tokens + cache_creation_tokens
     if total_cache > 0:
         efficiency = (cache_read_tokens / total_cache) * 100
-        metrics.append(
-            {
-                "MetricName": "CacheEfficiency",
-                "Value": efficiency,
-                "Unit": "Percent",
-                "Timestamp": timestamp,
-            }
-        )
+        metrics.append({"MetricName": "CacheEfficiency", "Value": efficiency, "Unit": "Percent", "Timestamp": timestamp})
 
     return metrics
 
 
 def aggregate_top_users(start_ms, end_ms):
-    """
-    Aggregate top 10 users by token usage.
-    """
+    """Aggregate top 10 users by token usage."""
     metrics = []
     timestamp = datetime.now(timezone.utc)
 
@@ -528,27 +521,22 @@ def aggregate_top_users(start_ms, end_ms):
                 tokens = float(field["value"])
 
         if user and tokens > 0:
-            # Store as ranked metric
-            metrics.append(
-                {
-                    "MetricName": "TopUserTokens",
-                    "Dimensions": [
-                        {"Name": "Rank", "Value": str(rank)},
-                        {"Name": "User", "Value": user},
-                    ],
-                    "Value": tokens,
-                    "Unit": "Count",
-                    "Timestamp": timestamp,
-                }
-            )
+            metrics.append({
+                "MetricName": "TopUserTokens",
+                "Dimensions": [
+                    {"Name": "Rank", "Value": str(rank)},
+                    {"Name": "User", "Value": user},
+                ],
+                "Value": tokens,
+                "Unit": "Count",
+                "Timestamp": timestamp,
+            })
 
     return metrics
 
 
 def aggregate_operations(start_ms, end_ms):
-    """
-    Aggregate operations by type.
-    """
+    """Aggregate operations by type."""
     metrics = []
     timestamp = datetime.now(timezone.utc)
 
@@ -571,23 +559,19 @@ def aggregate_operations(start_ms, end_ms):
                 usage = float(field["value"])
 
         if tool and usage > 0:
-            metrics.append(
-                {
-                    "MetricName": "OperationCount",
-                    "Dimensions": [{"Name": "OperationType", "Value": tool}],
-                    "Value": usage,
-                    "Unit": "Count",
-                    "Timestamp": timestamp,
-                }
-            )
+            metrics.append({
+                "MetricName": "OperationCount",
+                "Dimensions": [{"Name": "OperationType", "Value": tool}],
+                "Value": usage,
+                "Unit": "Count",
+                "Timestamp": timestamp,
+            })
 
     return metrics
 
 
 def aggregate_code_languages(start_ms, end_ms):
-    """
-    Aggregate code generation by language.
-    """
+    """Aggregate code generation by language."""
     metrics = []
     timestamp = datetime.now(timezone.utc)
 
@@ -610,23 +594,19 @@ def aggregate_code_languages(start_ms, end_ms):
                 edits = float(field["value"])
 
         if lang and edits > 0:
-            metrics.append(
-                {
-                    "MetricName": "CodeEditsByLanguage",
-                    "Dimensions": [{"Name": "Language", "Value": lang}],
-                    "Value": edits,
-                    "Unit": "Count",
-                    "Timestamp": timestamp,
-                }
-            )
+            metrics.append({
+                "MetricName": "CodeEditsByLanguage",
+                "Dimensions": [{"Name": "Language", "Value": lang}],
+                "Value": edits,
+                "Unit": "Count",
+                "Timestamp": timestamp,
+            })
 
     return metrics
 
 
 def aggregate_commits(start_ms, end_ms):
-    """
-    Aggregate commit count.
-    """
+    """Aggregate commit count."""
     query = """
     fields @message
     | filter @message like /claude_code.commit.count/
@@ -642,10 +622,7 @@ def aggregate_commits(start_ms, end_ms):
 
 
 def aggregate_lines_of_code(start_ms, end_ms):
-    """
-    Get individual line change events (not aggregated).
-    Returns list of events with timestamp, type, and count.
-    """
+    """Get individual line change events."""
     query = """
     fields @timestamp, @message
     | filter @message like /claude_code.lines_of_code.count/
@@ -684,11 +661,7 @@ def aggregate_lines_of_code(start_ms, end_ms):
 
 
 def aggregate_model_rate_metrics(start_ms, end_ms):
-    """
-    Query logs and bucket token/request counts by model and minute.
-    Returns dict of model -> minute -> {tokens, requests} for DynamoDB storage.
-    """
-    # Query for all token usage with timestamps and models
+    """Query logs and bucket token/request counts by model and minute."""
     query = """
     fields @timestamp, @message
     | filter @message like /claude_code.token.usage/
@@ -698,9 +671,7 @@ def aggregate_model_rate_metrics(start_ms, end_ms):
     | sort @timestamp asc
     """
 
-    model_metrics = defaultdict(
-        lambda: defaultdict(lambda: {"tokens": 0, "requests": 0})
-    )
+    model_metrics = defaultdict(lambda: defaultdict(lambda: {"tokens": 0, "requests": 0}))
 
     results = run_query(query, start_ms, end_ms)
     for result in results:
@@ -720,17 +691,13 @@ def aggregate_model_rate_metrics(start_ms, end_ms):
                 token_type = field["value"]
 
         if timestamp and model and tokens > 0:
-            # Parse timestamp and bucket by minute
             try:
                 dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                # Round down to minute
                 minute_dt = dt.replace(second=0, microsecond=0)
                 minute_str = minute_dt.strftime("%H:%M:%S")
 
-                # Add tokens to the minute bucket for this model
                 model_metrics[model][minute_str]["tokens"] += tokens
 
-                # Count requests (only for input tokens to avoid double counting)
                 if token_type == "input":
                     model_metrics[model][minute_str]["requests"] += 1
             except Exception as e:
@@ -740,56 +707,38 @@ def aggregate_model_rate_metrics(start_ms, end_ms):
 
 
 def write_to_dynamodb(
-    timestamp,
-    total_tokens,
-    unique_users,
-    user_details,
-    lines_added,
-    lines_removed,
-    line_events=None,
-    model_rate_metrics=None,
+    timestamp, total_tokens, unique_users, user_details,
+    lines_added, lines_removed, line_events=None, model_rate_metrics=None,
 ):
-    """
-    Write aggregated metrics to DynamoDB using single-partition design.
-    Schema: PK=METRICS, SK=ISO_TIMESTAMP#TYPE#DETAIL
-    Stores window summaries, user metrics, line events, and per-model rate metrics.
-    """
+    """Write aggregated metrics to DynamoDB."""
     try:
-        # Format timestamps
         iso_timestamp = timestamp.isoformat().replace("+00:00", "Z")
-        ttl = int((timestamp + timedelta(days=30)).timestamp())  # 30 day retention
+        ttl = int((timestamp + timedelta(days=30)).timestamp())
 
-        # Convert user details to Decimal
         top_users_decimal = []
         for user in user_details[:10] if user_details else []:
-            top_users_decimal.append(
-                {
-                    "email": user["email"],
-                    "tokens": Decimal(str(user.get("tokens", 0))),
-                    "requests": Decimal(str(user.get("requests", 0))),
-                }
-            )
+            top_users_decimal.append({
+                "email": user["email"],
+                "tokens": Decimal(str(user.get("tokens", 0))),
+                "requests": Decimal(str(user.get("requests", 0))),
+            })
 
         with table.batch_writer() as batch:
-            # 1. Write 5-minute window aggregate
+            # 1. Window aggregate
             window_item = {
                 "pk": "METRICS",
                 "sk": f"{iso_timestamp}#WINDOW#SUMMARY",
                 "unique_users": unique_users,
-                "total_tokens": (
-                    Decimal(str(total_tokens)) if total_tokens else Decimal(0)
-                ),
+                "total_tokens": Decimal(str(total_tokens)) if total_tokens else Decimal(0),
                 "top_users": top_users_decimal,
                 "lines_added": Decimal(str(lines_added)) if lines_added else Decimal(0),
-                "lines_removed": (
-                    Decimal(str(lines_removed)) if lines_removed else Decimal(0)
-                ),
+                "lines_removed": Decimal(str(lines_removed)) if lines_removed else Decimal(0),
                 "timestamp": iso_timestamp,
                 "ttl": ttl,
             }
             batch.put_item(Item=window_item)
 
-            # 2. Write lines of code summary
+            # 2. Lines of code
             if lines_added > 0 or lines_removed > 0:
                 lines_item = {
                     "pk": "METRICS",
@@ -801,16 +750,10 @@ def write_to_dynamodb(
                 }
                 batch.put_item(Item=lines_item)
 
-            # 2b. Write individual line change events
             if line_events:
                 for event in line_events:
-                    # Parse event timestamp to get ISO format
-                    event_dt = datetime.fromisoformat(
-                        event["timestamp"].replace("Z", "+00:00")
-                    )
+                    event_dt = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
                     event_iso = event_dt.isoformat() + "Z"
-
-                    # Use timestamp + type as unique identifier
                     event_id = f"{event['type'].upper()}#{event_dt.timestamp()}"
 
                     line_event_item = {
@@ -823,7 +766,7 @@ def write_to_dynamodb(
                     }
                     batch.put_item(Item=line_event_item)
 
-            # 3. Write individual user metrics for this window
+            # 3. User metrics
             for user in user_details:
                 user_item = {
                     "pk": "METRICS",
@@ -836,12 +779,10 @@ def write_to_dynamodb(
                 }
                 batch.put_item(Item=user_item)
 
-            # 4. Write per-model, per-minute rate metrics
+            # 4. Model rate metrics
             if model_rate_metrics:
                 for model_id, minute_data in model_rate_metrics.items():
                     for minute_time, metrics in minute_data.items():
-                        # Parse the minute time to get the full timestamp
-                        # minute_time is in format HH:MM:SS, combine with date from main timestamp
                         minute_dt = datetime.combine(
                             timestamp.date(),
                             datetime.strptime(minute_time, "%H:%M:%S").time(),
@@ -863,12 +804,9 @@ def write_to_dynamodb(
         line_events_count = len(line_events) if line_events else 0
         model_rate_count = (
             sum(len(minutes) for minutes in model_rate_metrics.values())
-            if model_rate_metrics
-            else 0
+            if model_rate_metrics else 0
         )
-        print(
-            f"Wrote window summary, {line_events_count} line events, {model_rate_count} model rate metrics, and {len(user_details)} user records to DynamoDB"
-        )
+        print(f"Wrote window summary, {line_events_count} line events, {model_rate_count} model rate metrics, and {len(user_details)} user records to DynamoDB")
 
     except Exception as e:
         print(f"Error writing to DynamoDB: {str(e)}")
@@ -876,12 +814,10 @@ def write_to_dynamodb(
 
 def update_quota_table(timestamp, user_details):
     """
-    Update monthly user quota tracking table with enhanced fields.
+    Update monthly user quota tracking table with per-model token breakdown and cost.
     Schema: PK=USER#{email}, SK=MONTH#{YYYY-MM}
-    Maintains running totals for each user per month including:
-    - Monthly and daily token totals
-    - Token type breakdown (input, output, cache)
-    - Group membership from JWT claims
+    Fields: input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+            total_tokens, daily_tokens, daily_cost, total_cost, models (map), groups
     """
     if not user_details:
         return
@@ -891,15 +827,18 @@ def update_quota_table(timestamp, user_details):
         current_date = timestamp.strftime("%Y-%m-%d")
         ttl = int(
             (timestamp.replace(day=28) + timedelta(days=32)).replace(day=1).timestamp()
-        )  # End of next month
+        )
 
         for user in user_details:
             user_email = user["email"]
             tokens_to_add = float(user.get("tokens", 0))
             input_tokens = float(user.get("input_tokens", 0))
             output_tokens = float(user.get("output_tokens", 0))
-            cache_tokens = float(user.get("cache_tokens", 0))
+            cache_read_tokens = float(user.get("cache_read_tokens", 0))
+            cache_write_tokens = float(user.get("cache_write_tokens", 0))
+            cost_increment = float(user.get("cost", 0))
             groups = user.get("groups", [])
+            models_data = user.get("models", {})
 
             if tokens_to_add <= 0:
                 continue
@@ -907,58 +846,70 @@ def update_quota_table(timestamp, user_details):
             pk = f"USER#{user_email}"
             sk = f"MONTH#{current_month}"
 
-            # First, get the current record to check daily_date
             try:
                 response = quota_table.get_item(Key={"pk": pk, "sk": sk})
                 existing = response.get("Item", {})
                 existing_daily_date = existing.get("daily_date")
 
-                # Determine if we need to reset daily tokens
-                if existing_daily_date != current_date:
-                    # New day - reset daily tokens
-                    daily_tokens_expr = ":tokens"
-                    daily_reset = True
-                else:
-                    # Same day - add to existing
-                    daily_tokens_expr = "daily_tokens + :tokens"
-                    daily_reset = False
+                daily_reset = existing_daily_date != current_date
 
-                # Build update expression with all enhanced fields
+                # Build the models map update: merge per-model token counts
+                existing_models = existing.get("models", {})
+                for model, md in models_data.items():
+                    if model not in existing_models:
+                        existing_models[model] = {
+                            "input": Decimal("0"), "output": Decimal("0"),
+                            "cache_read": Decimal("0"), "cache_write": Decimal("0"),
+                            "cost": Decimal("0"),
+                        }
+                    em = existing_models[model]
+                    em["input"] = Decimal(str(float(em.get("input", 0)) + md["input"]))
+                    em["output"] = Decimal(str(float(em.get("output", 0)) + md["output"]))
+                    em["cache_read"] = Decimal(str(float(em.get("cache_read", 0)) + md["cache_read"]))
+                    em["cache_write"] = Decimal(str(float(em.get("cache_write", 0)) + md["cache_write"]))
+                    model_cost = _cost_for_tokens(model, md["input"], md["output"], md["cache_read"], md["cache_write"])
+                    em["cost"] = Decimal(str(float(em.get("cost", 0)) + model_cost))
+
+                # Build update expression
                 update_expr = """
                     ADD total_tokens :tokens,
                         input_tokens :input_tokens,
                         output_tokens :output_tokens,
-                        cache_tokens :cache_tokens
+                        cache_read_tokens :cache_read_tokens,
+                        cache_write_tokens :cache_write_tokens,
+                        total_cost :cost_inc
                     SET last_updated = :updated,
                         #ttl = :ttl,
                         email = :email,
-                        daily_date = :daily_date
+                        daily_date = :daily_date,
+                        models = :models
                 """
 
                 expr_attr_values = {
                     ":tokens": Decimal(str(tokens_to_add)),
                     ":input_tokens": Decimal(str(input_tokens)),
                     ":output_tokens": Decimal(str(output_tokens)),
-                    ":cache_tokens": Decimal(str(cache_tokens)),
+                    ":cache_read_tokens": Decimal(str(cache_read_tokens)),
+                    ":cache_write_tokens": Decimal(str(cache_write_tokens)),
+                    ":cost_inc": Decimal(str(cost_increment)),
                     ":updated": timestamp.isoformat().replace("+00:00", "Z"),
                     ":ttl": ttl,
                     ":email": user_email,
                     ":daily_date": current_date,
+                    ":models": existing_models,
                 }
 
                 expr_attr_names = {"#ttl": "ttl"}
 
-                # Handle daily tokens based on date change
                 if daily_reset:
-                    update_expr += ", daily_tokens = :tokens"
+                    update_expr += ", daily_tokens = :tokens, daily_cost = :cost_inc"
                 else:
                     update_expr = update_expr.replace(
                         "ADD total_tokens :tokens",
-                        "ADD total_tokens :tokens, daily_tokens :tokens"
+                        "ADD total_tokens :tokens, daily_tokens :tokens, daily_cost :cost_inc"
                     )
 
-                # Add groups if available (for fine-grained quotas)
-                if groups and ENABLE_FINEGRAINED_QUOTAS:
+                if groups:
                     update_expr += ", #groups = :groups"
                     expr_attr_values[":groups"] = groups
                     expr_attr_names["#groups"] = "groups"
@@ -971,9 +922,7 @@ def update_quota_table(timestamp, user_details):
                 )
 
                 daily_note = " (daily reset)" if daily_reset else ""
-                print(
-                    f"Updated quota for {user_email}: +{tokens_to_add:,.0f} tokens for {current_month}{daily_note}"
-                )
+                print(f"Updated quota for {user_email}: +{tokens_to_add:,.0f} tokens, +${cost_increment:.4f} for {current_month}{daily_note}")
 
             except Exception as e:
                 print(f"Error updating quota for {user_email}: {str(e)}")

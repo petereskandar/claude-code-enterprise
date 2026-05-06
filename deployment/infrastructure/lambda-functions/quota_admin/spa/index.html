@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Code - Quota Admin Dashboard</title>
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+  <div class="topbar"></div>
+  <div class="banner">
+    <div class="banner-logo">
+      <div class="logo-box">PI</div>
+      <div class="logo-text">Poste Italiane &nbsp;|&nbsp; <span>Quota Admin</span></div>
+    </div>
+    <div class="banner-right" id="banner-right">
+      <span class="banner-email" id="banner-email"></span>
+      <button class="logout-icon-btn" id="logout-btn" style="display:none;" onclick="logout()" title="Logout">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Login Section -->
+  <div id="login-section" class="main">
+    <div class="page-title">
+      <h1>Claude Code Quota Management</h1>
+      <p>Dashboard amministrativa per gestione quote e consumi</p>
+    </div>
+    <div class="divider"></div>
+    <div class="card login-card">
+      <p>Accedi con il tuo account aziendale per gestire le quote</p>
+      <a class="login-btn" id="login-btn" href="#">Sign in with Entra ID</a>
+    </div>
+  </div>
+
+  <!-- Dashboard Section -->
+  <div id="dashboard-section" style="display:none;">
+    <div class="main">
+      <!-- Navigation Tabs -->
+      <nav class="tabs">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="users">Utenti</button>
+        <button class="tab" data-tab="groups">Gruppi</button>
+        <button class="tab" data-tab="policies">Policy</button>
+      </nav>
+
+      <!-- Overview Tab -->
+      <div id="tab-overview" class="tab-content active">
+        <div class="stats-grid" id="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value" id="stat-total-users">-</div>
+            <div class="stat-label">Utenti Attivi</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-total-cost">-</div>
+            <div class="stat-label">Costo Totale Mese</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-over-quota">-</div>
+            <div class="stat-label">Oltre Quota</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-blocked">-</div>
+            <div class="stat-label">Bloccati</div>
+          </div>
+        </div>
+        <div class="card" id="top-consumers">
+          <h3>Top Consumers</h3>
+          <div class="loading">Caricamento...</div>
+        </div>
+      </div>
+
+      <!-- Users Tab -->
+      <div id="tab-users" class="tab-content">
+        <div class="toolbar">
+          <div class="search-box">
+            <input type="text" id="user-search" placeholder="Cerca utente per email..." autocomplete="off">
+            <button class="search-btn" id="user-search-btn">Cerca</button>
+          </div>
+          <div class="pagination" id="users-pagination"></div>
+        </div>
+        <div class="card">
+          <table id="users-table">
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Policy</th>
+                <th>Costo Mese</th>
+                <th>Limite</th>
+                <th>Utilizzo</th>
+                <th>Stato</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody">
+              <tr><td colspan="7" class="loading">Caricamento...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Groups Tab -->
+      <div id="tab-groups" class="tab-content">
+        <div class="card">
+          <table id="groups-table">
+            <thead>
+              <tr>
+                <th>Gruppo</th>
+                <th>Utenti</th>
+                <th>Costo Totale</th>
+                <th>Limite Mensile</th>
+                <th>Enforcement</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="groups-tbody">
+              <tr><td colspan="6" class="loading">Caricamento...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Policies Tab -->
+      <div id="tab-policies" class="tab-content">
+        <div class="toolbar">
+          <button class="action-btn" id="add-policy-btn">+ Nuova Policy</button>
+        </div>
+        <div class="card">
+          <table id="policies-table">
+            <thead>
+              <tr>
+                <th>Tipo</th>
+                <th>Identificatore</th>
+                <th>Limite Mensile (USD)</th>
+                <th>Limite Giornaliero (USD)</th>
+                <th>Enforcement</th>
+                <th>Stato</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="policies-tbody">
+              <tr><td colspan="7" class="loading">Caricamento...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- User Detail Modal -->
+      <div id="user-detail-modal" class="modal" style="display:none;">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 id="modal-user-email">Dettaglio Utente</h2>
+            <button class="modal-close" id="modal-close">&times;</button>
+          </div>
+          <div class="modal-body" id="modal-body">
+            <div class="loading">Caricamento...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Policy Edit Modal -->
+      <div id="policy-modal" class="modal" style="display:none;">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 id="policy-modal-title">Policy</h2>
+            <button class="modal-close" id="policy-modal-close">&times;</button>
+          </div>
+          <div class="modal-body">
+            <form id="policy-form">
+              <div class="form-group">
+                <label>Tipo</label>
+                <select id="policy-type">
+                  <option value="user">Utente</option>
+                  <option value="group">Gruppo</option>
+                  <option value="default">Default</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Identificatore</label>
+                <input type="text" id="policy-identifier" placeholder="email o nome gruppo">
+              </div>
+              <div class="form-group">
+                <label>Limite Mensile (USD)</label>
+                <input type="number" id="policy-monthly-cost" step="0.01" min="0">
+              </div>
+              <div class="form-group">
+                <label>Limite Giornaliero (USD)</label>
+                <input type="number" id="policy-daily-cost" step="0.01" min="0">
+              </div>
+              <div class="form-group">
+                <label>Limite Mensile Token</label>
+                <input type="number" id="policy-monthly-tokens" min="0">
+              </div>
+              <div class="form-group">
+                <label>Limite Giornaliero Token</label>
+                <input type="number" id="policy-daily-tokens" min="0">
+              </div>
+              <div class="form-group">
+                <label>Enforcement</label>
+                <select id="policy-enforcement">
+                  <option value="alert">Alert (solo notifica)</option>
+                  <option value="block">Block (blocca accesso)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>
+                  <input type="checkbox" id="policy-enabled" checked> Abilitata
+                </label>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="action-btn">Salva</button>
+                <button type="button" class="cancel-btn" id="policy-cancel">Annulla</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p>Claude Code Quota Admin &mdash; Poste Italiane</p>
+    </div>
+  </div>
+
+  <script src="app.js?v=2"></script>
+</body>
+</html>

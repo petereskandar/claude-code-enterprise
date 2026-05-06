@@ -41,8 +41,8 @@ class TestPackageCommandCrossRegion:
             with open(config_path) as f:
                 config = json.load(f)
 
-            assert "ClaudeCode" in config
-            claude_config = config["ClaudeCode"]
+            assert "claude-code-default" in config
+            claude_config = config["claude-code-default"]
 
             # Check all expected fields
             assert claude_config["provider_domain"] == "test.okta.com"
@@ -81,7 +81,7 @@ class TestPackageCommandCrossRegion:
                 config = json.load(f)
 
             # Should default to 'us'
-            assert config["ClaudeCode"]["cross_region_profile"] == "us"
+            assert config["claude-code-default"]["cross_region_profile"] == "us"
 
     def test_installer_script_preserves_region(self):
         """Test that installer script correctly extracts region from config."""

@@ -1,0 +1,10 @@
+# Pre-built cross-platform binaries (e.g. macOS arm64 from GitHub Actions CI).
+# These are committed by CI workflows so Windows/Linux developers can build
+# complete multi-platform packages without requiring a macOS machine.
+#
+# Files placed here by CI:
+#   credential-process-macos-arm64   (from .github/workflows/build-macos.yml)
+#   otel-helper-macos-arm64          (from .github/workflows/build-macos.yml)
+#
+# The 'ccwb package' command automatically includes any files found here
+# in the output package alongside locally-built platform binaries.
