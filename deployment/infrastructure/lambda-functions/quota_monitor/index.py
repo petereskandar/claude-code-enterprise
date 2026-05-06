@@ -1,4 +1,5 @@
-# ABOUTME: Lambda function that monitors user cost/token quotas and sends SNS alerts
+# ABOUTME: Lambda function that monitors user cost/token quotas and sends SES email alerts
+# ABOUTME: Sends notifications to both admins (from Parameter Store) and the developer
 # ABOUTME: Supports cost-based (primary) and token-based (fallback) quotas
 # ABOUTME: Policy precedence: user > group > default. Personal always wins.
 
@@ -11,13 +12,18 @@ from boto3.dynamodb.conditions import Key, Attr
 
 # Initialize clients
 dynamodb = boto3.resource("dynamodb")
-sns_client = boto3.client("sns")
+ses_client = boto3.client("ses")
+ssm_client = boto3.client("ssm")
 
 # Configuration
 QUOTA_TABLE = os.environ.get("QUOTA_TABLE", "UserQuotaMetrics")
 POLICIES_TABLE = os.environ.get("POLICIES_TABLE")
-SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "costoptimization_cloud@posteitaliane.it")
+ADMIN_EMAILS_PARAM = os.environ.get("ADMIN_EMAILS_PARAM", "/claude-code/quota/admin-emails")
 ENABLE_FINEGRAINED_QUOTAS = os.environ.get("ENABLE_FINEGRAINED_QUOTAS", "false").lower() == "true"
+
+# Cache admin emails (refreshed each invocation)
+_admin_emails_cache = None
 
 # Default limits (fallback when no policy defined)
 MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "300000000"))
@@ -487,16 +493,35 @@ def record_sent_alert(month_name, email, alert_type, alert_level, alert_data):
         print(f"Error recording sent alert: {str(e)}")
 
 
+def get_admin_emails():
+    global _admin_emails_cache
+    if _admin_emails_cache is not None:
+        return _admin_emails_cache
+    try:
+        response = ssm_client.get_parameter(Name=ADMIN_EMAILS_PARAM)
+        raw = response["Parameter"]["Value"]
+        _admin_emails_cache = [e.strip() for e in raw.split(",") if e.strip()]
+    except Exception as e:
+        print(f"Error reading admin emails from SSM: {e}")
+        _admin_emails_cache = []
+    return _admin_emails_cache
+
+
 def send_alerts(alerts):
-    if not SNS_TOPIC_ARN:
-        print("Warning: SNS_TOPIC_ARN not configured - skipping alert sending")
+    if not SENDER_EMAIL:
+        print("Warning: SENDER_EMAIL not configured - skipping alert sending")
         return
+
+    admin_emails = get_admin_emails()
+    if not admin_emails:
+        print("Warning: No admin emails configured in Parameter Store")
 
     for alert in alerts:
         try:
             alert_type = alert.get("alert_type", "monthly")
             alert_level = alert["alert_level"]
             unit = alert.get("unit", "tokens")
+            dev_email = alert["user"]
 
             level_prefix = {
                 "warning": "WARNING",
@@ -523,19 +548,25 @@ def send_alerts(alerts):
             else:
                 message = format_monthly_alert(alert)
 
-            sns_client.publish(
-                TopicArn=SNS_TOPIC_ARN,
-                Subject=subject,
-                Message=message,
-                MessageAttributes={
-                    "user": {"DataType": "String", "StringValue": alert["user"]},
-                    "alert_type": {"DataType": "String", "StringValue": alert_type},
-                    "alert_level": {"DataType": "String", "StringValue": alert_level},
-                    "percentage": {"DataType": "Number", "StringValue": str(alert["percentage"])},
+            # Build recipient list: admins + the developer
+            recipients = list(admin_emails)
+            if dev_email and dev_email not in recipients:
+                recipients.append(dev_email)
+
+            if not recipients:
+                print(f"No recipients for alert {alert_type} {alert_level} for {dev_email}")
+                continue
+
+            ses_client.send_email(
+                Source=SENDER_EMAIL,
+                Destination={"ToAddresses": recipients},
+                Message={
+                    "Subject": {"Data": subject, "Charset": "UTF-8"},
+                    "Body": {"Text": {"Data": message, "Charset": "UTF-8"}},
                 },
             )
 
-            print(f"Sent {alert_type} {alert_level} alert for {alert['user']} ({alert['percentage']:.1f}%)")
+            print(f"Sent {alert_type} {alert_level} email for {dev_email} to {len(recipients)} recipient(s)")
 
         except Exception as e:
             print(f"Error sending alert for {alert['user']}: {str(e)}")

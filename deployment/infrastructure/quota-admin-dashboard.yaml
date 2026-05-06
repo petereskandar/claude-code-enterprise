@@ -1,0 +1,349 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Claude Code Quota Admin Dashboard - CloudFront SPA + API Gateway backend for managing user/group quotas
+
+Parameters:
+  AzureTenantId:
+    Type: String
+    Default: 761de76f-3d5c-4174-917c-5ad4d06360cb
+    Description: Azure AD / Entra ID tenant ID
+
+  AzureClientId:
+    Type: String
+    Default: 97c4d1b5-7c46-4bff-b6cf-d93898635821
+    Description: Azure AD / Entra ID application (client) ID for JWT auth
+
+  AdminEmailsParam:
+    Type: String
+    Default: /claude-code/quota/admin-emails
+    Description: SSM Parameter path containing comma-separated admin emails
+
+  QuotaMetricsTableName:
+    Type: String
+    Default: UserQuotaMetrics
+    Description: DynamoDB table name for user quota metrics
+
+  PoliciesTableName:
+    Type: String
+    Default: QuotaPolicies
+    Description: DynamoDB table name for quota policies
+
+  MetricsTableName:
+    Type: String
+    Default: ClaudeCodeMetrics
+    Description: DynamoDB table name for raw metrics data
+
+Resources:
+  # ============================================================
+  # S3 Bucket for SPA static files
+  # ============================================================
+  AdminSPABucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'claude-code-admin-dashboard-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Name
+          Value: ClaudeCode-AdminDashboard-SPA
+
+  AdminSPABucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AdminSPABucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${AdminSPABucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${AdminCloudFrontDistribution}'
+
+  # ============================================================
+  # CloudFront Distribution
+  # ============================================================
+  AdminCloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-OAC'
+        Description: OAC for admin dashboard S3 bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  AdminCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Claude Code Quota Admin Dashboard
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt AdminSPABucket.RegionalDomainName
+            OriginAccessControlId: !Ref AdminCloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+      Tags:
+        - Key: Name
+          Value: ClaudeCode-AdminDashboard
+
+  # ============================================================
+  # API Gateway (Backend API)
+  # ============================================================
+  AdminApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: ClaudeCode-QuotaAdmin-API
+      Description: Backend API for admin dashboard (JWT authenticated)
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub 'https://${AdminCloudFrontDistribution.DomainName}'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        MaxAge: 300
+
+  AdminApiAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref AdminApi
+      AuthorizerType: JWT
+      Name: EntraIdAuthorizer
+      IdentitySource:
+        - '$request.header.Authorization'
+      JwtConfiguration:
+        Audience:
+          - !Ref AzureClientId
+        Issuer: !Sub 'https://login.microsoftonline.com/${AzureTenantId}/v2.0'
+
+  AdminApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref AdminApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AdminApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  # API Routes
+  ApiOverviewRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'GET /api/overview'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
+  ApiUsersRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'GET /api/users'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
+  ApiUserDetailRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'GET /api/users/{email}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
+  ApiGroupsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'GET /api/groups'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
+  ApiPoliciesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'GET /api/policies'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
+  ApiPolicyPutRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'PUT /api/policies/{type}/{identifier}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
+  ApiPolicyDeleteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'DELETE /api/policies/{type}/{identifier}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
+  AdminApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref AdminApi
+      StageName: $default
+      AutoDeploy: true
+
+  AdminApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AdminApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AdminApi}/*'
+
+  # ============================================================
+  # Lambda (Backend API only)
+  # ============================================================
+  AdminApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: QuotaAdminPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PoliciesTableName}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PoliciesTableName}/index/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${QuotaMetricsTableName}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MetricsTableName}'
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AdminEmailsParam}'
+
+  AdminApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ClaudeCode-QuotaAdmin
+      RetentionInDays: 14
+
+  AdminApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ClaudeCode-QuotaAdmin
+      Description: Backend API for admin dashboard - CRUD policies and read usage
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt AdminApiRole.Arn
+      Environment:
+        Variables:
+          QUOTA_TABLE: !Ref QuotaMetricsTableName
+          POLICIES_TABLE: !Ref PoliciesTableName
+          METRICS_TABLE: !Ref MetricsTableName
+          ADMIN_EMAILS_PARAM: !Ref AdminEmailsParam
+      Code:
+        S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+        S3Key: claude-code/admin/dashboard/api.zip
+
+Outputs:
+  DashboardUrl:
+    Description: CloudFront URL for the admin dashboard
+    Value: !Sub 'https://${AdminCloudFrontDistribution.DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardUrl'
+
+  ApiEndpoint:
+    Description: API Gateway endpoint for backend calls
+    Value: !Sub 'https://${AdminApi}.execute-api.${AWS::Region}.amazonaws.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  SPABucketName:
+    Description: S3 bucket for static SPA files
+    Value: !Ref AdminSPABucket
+    Export:
+      Name: !Sub '${AWS::StackName}-SPABucket'
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (for invalidation on deploy)
+    Value: !Ref AdminCloudFrontDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-DistributionId'
+
+  AdminApiFunctionArn:
+    Description: ARN of the admin API Lambda
+    Value: !GetAtt AdminApiFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionArn'

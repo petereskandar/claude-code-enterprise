@@ -75,6 +75,14 @@ Parameters:
   OidcClientId:
     Type: String
     Description: OIDC client ID (audience) for JWT validation
+  NotificationSenderEmail:
+    Type: String
+    Default: costoptimization_cloud@posteitaliane.it
+    Description: SES verified sender email for quota notifications to admins and developers
+  AdminEmails:
+    Type: String
+    Default: peter.eskandar@posteitaliane.it
+    Description: Comma-separated list of admin emails to receive quota notifications
 Resources:
   QuotaPolicies:
     Type: AWS::DynamoDB::Table
@@ -132,16 +140,21 @@ Resources:
         Value: UserQuotaMetrics
       - Key: Purpose
         Value: User quota monitoring and alerts
-  QuotaAlertTopic:
-    Type: AWS::SNS::Topic
+  AdminEmailsParameter:
+    Type: AWS::SSM::Parameter
     Properties:
-      TopicName: claude-code-quota-alerts
-      DisplayName: Claude Code Quota Alerts
+      Name: /claude-code/quota/admin-emails
+      Type: String
+      Value: !Ref AdminEmails
+      Description: Comma-separated list of admin emails for quota notifications
       Tags:
-      - Key: Name
-        Value: ClaudeCodeQuotaAlerts
-      - Key: Purpose
-        Value: Quota monitoring notifications
+        Name: ClaudeCodeQuotaAdminEmails
+        Purpose: Quota notification recipients
+
+  SesEmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref NotificationSenderEmail
   QuotaMonitorRole:
     Type: AWS::IAM::Role
     Properties:
@@ -182,9 +195,17 @@ Resources:
             - Fn::Sub: ${QuotaPolicies.Arn}/index/*
           - Effect: Allow
             Action:
-            - sns:Publish
+            - ses:SendEmail
+            - ses:SendRawEmail
+            Resource: '*'
+            Condition:
+              StringEquals:
+                ses:FromAddress: !Ref NotificationSenderEmail
+          - Effect: Allow
+            Action:
+            - ssm:GetParameter
             Resource:
-              Ref: QuotaAlertTopic
+            - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/claude-code/quota/admin-emails'
   QuotaMonitorFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -204,8 +225,9 @@ Resources:
             Ref: UserQuotaMetrics
           POLICIES_TABLE:
             Ref: QuotaPolicies
-          SNS_TOPIC_ARN:
-            Ref: QuotaAlertTopic
+          SENDER_EMAIL:
+            Ref: NotificationSenderEmail
+          ADMIN_EMAILS_PARAM: /claude-code/quota/admin-emails
           MONTHLY_TOKEN_LIMIT:
             Ref: MonthlyTokenLimit
           WARNING_THRESHOLD_80:
@@ -521,13 +543,18 @@ Outputs:
     Export:
       Name:
         Fn::Sub: ${AWS::StackName}-PoliciesTableArn
-  QuotaAlertTopicArn:
-    Description: SNS Topic ARN for quota alerts - subscribe to this for notifications
-    Value:
-      Ref: QuotaAlertTopic
+  NotificationSender:
+    Description: SES sender email for quota notifications
+    Value: !Ref NotificationSenderEmail
     Export:
       Name:
-        Fn::Sub: ${AWS::StackName}-QuotaAlertTopicArn
+        Fn::Sub: ${AWS::StackName}-NotificationSender
+  AdminEmailsParameterName:
+    Description: SSM Parameter containing admin notification emails
+    Value: /claude-code/quota/admin-emails
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-AdminEmailsParam
   QuotaMonitorFunctionArn:
     Description: ARN of the quota monitoring Lambda function
     Value:
