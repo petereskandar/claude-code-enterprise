@@ -19,6 +19,8 @@ policies_table = dynamodb.Table(POLICIES_TABLE)
 metrics_table = dynamodb.Table(METRICS_TABLE)
 
 _admin_emails_cache = None
+_admin_emails_cache_time = 0
+_ADMIN_CACHE_TTL = 300
 
 
 def handler(event, context):
@@ -289,15 +291,19 @@ def _get_caller_email(event):
 
 
 def _is_admin(email):
-    global _admin_emails_cache
-    if _admin_emails_cache is None:
+    import time
+    global _admin_emails_cache, _admin_emails_cache_time
+    now = time.time()
+    if _admin_emails_cache is None or (now - _admin_emails_cache_time) > _ADMIN_CACHE_TTL:
         try:
             response = ssm_client.get_parameter(Name=ADMIN_EMAILS_PARAM)
             raw = response["Parameter"]["Value"]
             _admin_emails_cache = [e.strip().lower() for e in raw.split(",") if e.strip()]
+            _admin_emails_cache_time = now
         except Exception as e:
             print(f"Error reading admin emails: {e}")
-            _admin_emails_cache = []
+            if _admin_emails_cache is None:
+                _admin_emails_cache = []
     return email.lower() in _admin_emails_cache
 
 

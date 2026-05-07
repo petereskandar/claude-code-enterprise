@@ -99,10 +99,18 @@ function apiCall(path, method, body) {
   if (body) opts.body = JSON.stringify(body);
 
   return fetch(CONFIG.API_BASE + path, opts).then(function(resp) {
-    if (resp.status === 401 || resp.status === 403) {
+    if (resp.status === 401) {
       sessionStorage.clear();
       window.location.href = getAuthUrl();
       return Promise.reject(new Error("Unauthorized"));
+    }
+    if (resp.status === 403) {
+      document.getElementById("dashboard-section").innerHTML =
+        '<div style="text-align:center;padding:60px 20px;">' +
+        '<h2 style="color:#c62828;margin-bottom:12px;">Accesso Negato</h2>' +
+        '<p style="color:#5d5e61;">Il tuo account (' + state.email + ') non è autorizzato ad accedere a questa console.</p>' +
+        '<p style="color:#5d5e61;margin-top:8px;">Contatta un amministratore per richiedere l\'accesso.</p></div>';
+      return Promise.reject(new Error("Forbidden"));
     }
     if (!resp.ok) {
       return Promise.reject(new Error("API " + resp.status));
