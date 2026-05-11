@@ -81,7 +81,7 @@ Parameters:
     Description: SES verified sender email for quota notifications to admins and developers
   AdminEmails:
     Type: String
-    Default: peter.eskandar@posteitaliane.it
+    Default: peter.eskandar@posteitaliane.it,GIUSEPPE.BRINDISI@posteitaliane.it,CLAUDIO.FALCONE@POSTEITALIANE.IT
     Description: Comma-separated list of admin emails to receive quota notifications
 Resources:
   QuotaPolicies:

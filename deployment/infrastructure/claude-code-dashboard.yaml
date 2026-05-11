@@ -463,7 +463,7 @@ Resources:
           MAX_QUERY_DAYS: '31'
       Code:
         S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
-        S3Key: 7e410b01217950633eefc980f31b3870
+        S3Key: claude-code/dashboard/total-cost.zip
   TotalTokensWidget:
     Type: AWS::Lambda::Function
     Properties:
