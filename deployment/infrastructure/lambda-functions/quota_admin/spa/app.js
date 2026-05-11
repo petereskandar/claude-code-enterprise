@@ -245,39 +245,74 @@ function openUserDetail(email) {
 
   apiCall("/api/users/" + encodeURIComponent(email)).then(function(data) {
     var html = '';
+    var pct = data.percentage || 0;
+    var pctCls = pct > 100 ? "critical" : (pct > 80 ? "warning" : "ok");
+    var statusText = pct > 100 ? "Quota Superata" : (pct > 90 ? "Critico" : (pct > 80 ? "Attenzione" : "In Regola"));
+    var statusIcon = pct > 100 ? "&#x26D4;" : (pct > 80 ? "&#x26A0;" : "&#x2705;");
 
-    // Usage section
-    html += '<div class="detail-section"><h4>Consumi Mese Corrente</h4>';
-    html += '<div class="detail-grid">';
-    html += detailItem("Costo Totale", "$" + (data.total_cost || 0).toFixed(2));
-    html += detailItem("Costo Giornaliero", "$" + (data.daily_cost || 0).toFixed(2));
-    html += detailItem("Token Totali", formatNumber(data.total_tokens || 0));
-    html += detailItem("Token Giornalieri", formatNumber(data.daily_tokens || 0));
-    html += detailItem("Input Tokens", formatNumber(data.input_tokens || 0));
-    html += detailItem("Output Tokens", formatNumber(data.output_tokens || 0));
-    html += detailItem("Cache Read", formatNumber(data.cache_read_tokens || 0));
-    html += detailItem("Cache Write", formatNumber(data.cache_write_tokens || 0));
-    html += "</div></div>";
+    // Usage summary banner
+    html += '<div class="ud-summary ud-summary-' + pctCls + '">';
+    html += '<div class="ud-summary-left">';
+    html += '<div class="ud-summary-cost">$' + (data.total_cost || 0).toFixed(2) + '</div>';
+    html += '<div class="ud-summary-label">costo mese corrente</div>';
+    html += '</div>';
+    html += '<div class="ud-summary-right">';
+    html += '<div class="ud-summary-pct">' + pct.toFixed(1) + '%</div>';
+    html += '<div class="ud-summary-status">' + statusIcon + ' ' + statusText + '</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // Progress bar
+    html += '<div class="ud-progress-wrap">';
+    html += '<div class="ud-progress"><div class="ud-progress-fill ' + pctCls + '" style="width:' + Math.min(pct, 100) + '%"></div></div>';
+    html += '<div class="ud-progress-labels"><span>$0</span><span>Limite: ' + (data.monthly_cost_limit ? "$" + data.monthly_cost_limit.toFixed(2) : "N/A") + '</span></div>';
+    html += '</div>';
+
+    // Cost metrics cards
+    html += '<div class="detail-section"><h4>Consumi</h4>';
+    html += '<div class="ud-metrics">';
+    html += udMetricCard("Costo Totale", "$" + (data.total_cost || 0).toFixed(2), "blue");
+    html += udMetricCard("Costo Oggi", "$" + (data.daily_cost || 0).toFixed(2), "blue");
+    html += udMetricCard("Token Totali", formatNumber(data.total_tokens || 0), "purple");
+    html += udMetricCard("Token Oggi", formatNumber(data.daily_tokens || 0), "purple");
+    html += '</div></div>';
+
+    // Token breakdown
+    html += '<div class="detail-section"><h4>Dettaglio Token</h4>';
+    html += '<div class="ud-metrics">';
+    html += udMetricCard("Input", formatNumber(data.input_tokens || 0), "gray");
+    html += udMetricCard("Output", formatNumber(data.output_tokens || 0), "gray");
+    html += udMetricCard("Cache Read", formatNumber(data.cache_read_tokens || 0), "green");
+    html += udMetricCard("Cache Write", formatNumber(data.cache_write_tokens || 0), "orange");
+    html += '</div></div>';
 
     // Policy section
+    var polType = data.policy_type || "default";
+    var polCls = polType === "user" ? "badge-user" : (polType === "group" ? "badge-group" : "badge-default");
+    var enfMode = data.enforcement_mode || "alert";
+    var enfCls = enfMode === "block" ? "badge-critical" : "badge-warning";
+
     html += '<div class="detail-section"><h4>Policy Applicata</h4>';
-    html += '<div class="detail-grid">';
-    html += detailItem("Tipo", data.policy_type || "default");
-    html += detailItem("Identificatore", data.policy_identifier || "default");
-    html += detailItem("Limite Mensile", data.monthly_cost_limit ? "$" + data.monthly_cost_limit.toFixed(2) : "N/A");
-    html += detailItem("Limite Giornaliero", data.daily_cost_limit ? "$" + data.daily_cost_limit.toFixed(2) : "N/A");
-    html += detailItem("Enforcement", data.enforcement_mode || "alert");
-    html += detailItem("Utilizzo", (data.percentage || 0).toFixed(1) + "%");
-    html += "</div></div>";
+    html += '<div class="ud-policy-card">';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Tipo</span><span class="badge ' + polCls + '">' + polType + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Identificatore</span><span class="ud-policy-value">' + escHtml(data.policy_identifier || "default") + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Limite Mensile</span><span class="ud-policy-value">' + (data.monthly_cost_limit ? "$" + data.monthly_cost_limit.toFixed(2) : "N/A") + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Limite Giornaliero</span><span class="ud-policy-value">' + (data.daily_cost_limit ? "$" + data.daily_cost_limit.toFixed(2) : "N/A") + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Enforcement</span><span class="badge ' + enfCls + '">' + enfMode + '</span></div>';
+    html += '</div></div>';
 
     // Groups section
     if (data.groups && data.groups.length > 0) {
       html += '<div class="detail-section"><h4>Gruppi</h4>';
-      html += "<p>" + data.groups.join(", ") + "</p></div>";
+      html += '<div class="ud-groups">';
+      data.groups.forEach(function(g) {
+        html += '<span class="ud-group-tag">' + escHtml(g) + '</span>';
+      });
+      html += '</div></div>';
     }
 
     // Actions
-    html += '<div class="detail-section" style="margin-top:24px;">';
+    html += '<div class="ud-actions">';
     html += '<button class="action-btn" onclick="openPolicyForUser(\'' + escAttr(email) + '\')">Imposta Quota Personalizzata</button>';
     html += "</div>";
 
@@ -285,6 +320,10 @@ function openUserDetail(email) {
   }).catch(function(e) {
     document.getElementById("modal-body").innerHTML = '<div class="error">Errore: ' + e.message + "</div>";
   });
+}
+
+function udMetricCard(label, value, color) {
+  return '<div class="ud-metric-card ud-metric-' + color + '"><div class="ud-metric-value">' + value + '</div><div class="ud-metric-label">' + label + '</div></div>';
 }
 
 function detailItem(label, value) {
