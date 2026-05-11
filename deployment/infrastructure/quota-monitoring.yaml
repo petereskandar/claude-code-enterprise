@@ -84,6 +84,22 @@ Parameters:
     Default: peter.eskandar@posteitaliane.it,GIUSEPPE.BRINDISI@posteitaliane.it,CLAUDIO.FALCONE@POSTEITALIANE.IT
     Description: Comma-separated list of admin emails to receive quota notifications
 Resources:
+  UserDirectory:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UserDirectory
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: email
+        AttributeType: S
+      KeySchema:
+      - AttributeName: email
+        KeyType: HASH
+      Tags:
+      - Key: Name
+        Value: UserDirectory
+      - Key: Purpose
+        Value: Developer directory for admin console enrichment
   QuotaPolicies:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -625,3 +641,19 @@ Outputs:
     Export:
       Name:
         Fn::Sub: ${AWS::StackName}-CostReconcilerFunctionArn
+  UserDirectoryTableName:
+    Description: Name of the UserDirectory DynamoDB table
+    Value:
+      Ref: UserDirectory
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-UserDirectoryTableName
+  UserDirectoryTableArn:
+    Description: ARN of the UserDirectory DynamoDB table
+    Value:
+      Fn::GetAtt:
+      - UserDirectory
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-UserDirectoryTableArn
