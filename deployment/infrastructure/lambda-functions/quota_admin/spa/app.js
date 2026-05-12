@@ -12,7 +12,16 @@ var state = {
   usersPage: 1,
   usersPageSize: 20,
   usersTotal: 0,
-  usersSearch: ""
+  usersSearch: "",
+  availableMonths: [],
+  filterMode: "single",
+  filterMonth: null,
+  filterFrom: null,
+  filterTo: null,
+  groupsFilterMode: "single",
+  groupsFilterMonth: null,
+  groupsFilterFrom: null,
+  groupsFilterTo: null,
 };
 
 // ============================================================
@@ -69,7 +78,74 @@ function showDashboard() {
   document.getElementById("dashboard-section").style.display = "block";
   document.getElementById("banner-email").textContent = state.email;
   document.getElementById("logout-btn").style.display = "flex";
-  loadOverview();
+  loadAvailableMonths().then(function() { loadOverview(); });
+}
+
+function loadAvailableMonths() {
+  return apiCall("/api/available-months").then(function(data) {
+    state.availableMonths = data.months || [];
+    if (state.availableMonths.length > 0 && !state.filterMonth) {
+      state.filterMonth = state.availableMonths[0];
+      state.groupsFilterMonth = state.availableMonths[0];
+    }
+    populateMonthSelects();
+  }).catch(function() {
+    var now = new Date();
+    var current = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+    state.availableMonths = [current];
+    state.filterMonth = current;
+    state.groupsFilterMonth = current;
+    populateMonthSelects();
+  });
+}
+
+function populateMonthSelects() {
+  var ids = ["filter-month", "filter-from", "filter-to", "groups-filter-month", "groups-filter-from", "groups-filter-to"];
+  ids.forEach(function(id) {
+    var sel = document.getElementById(id);
+    if (!sel) return;
+    sel.innerHTML = "";
+    state.availableMonths.forEach(function(m) {
+      var opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = formatMonthLabel(m);
+      sel.appendChild(opt);
+    });
+  });
+  if (state.filterMonth) document.getElementById("filter-month").value = state.filterMonth;
+  if (state.groupsFilterMonth) document.getElementById("groups-filter-month").value = state.groupsFilterMonth;
+  if (state.availableMonths.length > 1) {
+    document.getElementById("filter-from").value = state.availableMonths[state.availableMonths.length - 1];
+    document.getElementById("filter-to").value = state.availableMonths[0];
+    document.getElementById("groups-filter-from").value = state.availableMonths[state.availableMonths.length - 1];
+    document.getElementById("groups-filter-to").value = state.availableMonths[0];
+  }
+}
+
+function formatMonthLabel(m) {
+  var parts = m.split("-");
+  var names = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
+  return names[parseInt(parts[1]) - 1] + " " + parts[0];
+}
+
+function toggleFilterMode(prefix) {
+  var mode = document.getElementById(prefix + "filter-mode").value;
+  var isSingle = mode === "single";
+  document.getElementById(prefix + "filter-month").style.display = isSingle ? "" : "none";
+  document.getElementById(prefix + "filter-from").style.display = isSingle ? "none" : "";
+  document.getElementById(prefix + "filter-range-sep").style.display = isSingle ? "none" : "";
+  document.getElementById(prefix + "filter-to").style.display = isSingle ? "none" : "";
+}
+
+function getFilterParams(prefix) {
+  var mode = document.getElementById(prefix + "filter-mode").value;
+  if (mode === "single") {
+    return "month=" + document.getElementById(prefix + "filter-month").value;
+  } else {
+    var from = document.getElementById(prefix + "filter-from").value;
+    var to = document.getElementById(prefix + "filter-to").value;
+    return "from=" + from + "&to=" + to;
+  }
 }
 
 function logout() {
@@ -145,7 +221,8 @@ function initTabs() {
 // Overview
 // ============================================================
 function loadOverview() {
-  apiCall("/api/overview").then(function(data) {
+  var params = "?" + getFilterParams("");
+  apiCall("/api/overview" + params).then(function(data) {
     document.getElementById("stat-total-users").textContent = data.total_users || 0;
     document.getElementById("stat-total-cost").textContent = "$" + (data.total_cost || 0).toFixed(2);
     document.getElementById("stat-over-quota").textContent = data.over_quota || 0;
@@ -179,6 +256,7 @@ function loadOverview() {
 function loadUsers() {
   var params = "?page=" + state.usersPage + "&page_size=" + state.usersPageSize;
   if (state.usersSearch) params += "&search=" + encodeURIComponent(state.usersSearch);
+  params += "&" + getFilterParams("");
 
   apiCall("/api/users" + params).then(function(data) {
     state.usersTotal = data.total || 0;
@@ -245,7 +323,8 @@ function openUserDetail(email) {
   document.getElementById("modal-user-email").textContent = email;
   document.getElementById("modal-body").innerHTML = '<div class="loading">Caricamento...</div>';
 
-  apiCall("/api/users/" + encodeURIComponent(email)).then(function(data) {
+  var detailParams = "?" + getFilterParams("");
+  apiCall("/api/users/" + encodeURIComponent(email) + detailParams).then(function(data) {
     var html = '';
     var pct = data.percentage || 0;
     var pctCls = pct > 100 ? "critical" : (pct > 80 ? "warning" : "ok");
@@ -346,7 +425,8 @@ function detailItem(label, value) {
 // Groups
 // ============================================================
 function loadGroups() {
-  apiCall("/api/groups").then(function(data) {
+  var params = "?" + getFilterParams("groups-");
+  apiCall("/api/groups" + params).then(function(data) {
     var tbody = document.getElementById("groups-tbody");
     if (!data.groups || data.groups.length === 0) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nessun gruppo trovato</td></tr>';
@@ -519,6 +599,82 @@ function formatNumber(n) {
 }
 
 // ============================================================
+// Export Excel
+// ============================================================
+function exportUsersExcel() {
+  var params = "?export=true";
+  if (state.usersSearch) params += "&search=" + encodeURIComponent(state.usersSearch);
+  params += "&" + getFilterParams("");
+
+  apiCall("/api/users" + params).then(function(data) {
+    if (!data.users || data.users.length === 0) {
+      alert("Nessun dato da esportare");
+      return;
+    }
+    var period = (data.months || []).join(", ");
+    var headers = ["Email", "Nome Cognome", "III Livello", "Business Unit", "Policy", "Costo Periodo (USD)", "Limite (USD)", "Utilizzo %", "Token Totali"];
+    var rows = [headers];
+    data.users.forEach(function(u) {
+      rows.push([
+        u.email,
+        u.nome_cognome || "",
+        u.iii_livello || "",
+        u.business_unit || "",
+        u.policy_type || "default",
+        (u.total_cost || 0).toFixed(2),
+        (u.limit || 0).toFixed(2),
+        (u.percentage || 0).toFixed(1),
+        Math.round(u.total_tokens || 0),
+      ]);
+    });
+    downloadCsv(rows, "utenti_" + (data.months || []).join("_") + ".csv");
+  }).catch(function(e) {
+    alert("Errore export: " + e.message);
+  });
+}
+
+function exportGroupsExcel() {
+  var params = "?" + getFilterParams("groups-");
+  apiCall("/api/groups" + params).then(function(data) {
+    if (!data.groups || data.groups.length === 0) {
+      alert("Nessun dato da esportare");
+      return;
+    }
+    var headers = ["Gruppo", "Utenti", "Costo Totale (USD)", "Limite Mensile (USD)", "Enforcement"];
+    var rows = [headers];
+    data.groups.forEach(function(g) {
+      rows.push([
+        g.name,
+        g.user_count || 0,
+        (g.total_cost || 0).toFixed(2),
+        g.monthly_cost_limit ? g.monthly_cost_limit.toFixed(2) : "N/A",
+        g.enforcement_mode || "N/A",
+      ]);
+    });
+    downloadCsv(rows, "gruppi_" + (data.months || []).join("_") + ".csv");
+  }).catch(function(e) {
+    alert("Errore export: " + e.message);
+  });
+}
+
+function downloadCsv(rows, filename) {
+  var csv = rows.map(function(row) {
+    return row.map(function(cell) {
+      var s = String(cell).replace(/"/g, '""');
+      return '"' + s + '"';
+    }).join(";");
+  }).join("\r\n");
+  var bom = "﻿";
+  var blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
 // Init
 // ============================================================
 document.addEventListener("DOMContentLoaded", function() {
@@ -550,4 +706,23 @@ document.addEventListener("DOMContentLoaded", function() {
   document.getElementById("add-policy-btn").addEventListener("click", function() {
     openPolicyModal(null);
   });
+
+  // Filters - Users
+  document.getElementById("filter-mode").addEventListener("change", function() {
+    toggleFilterMode("");
+  });
+  document.getElementById("filter-apply-btn").addEventListener("click", function() {
+    state.usersPage = 1;
+    loadUsers();
+  });
+  document.getElementById("export-users-btn").addEventListener("click", exportUsersExcel);
+
+  // Filters - Groups
+  document.getElementById("groups-filter-mode").addEventListener("change", function() {
+    toggleFilterMode("groups-");
+  });
+  document.getElementById("groups-filter-apply-btn").addEventListener("click", function() {
+    loadGroups();
+  });
+  document.getElementById("export-groups-btn").addEventListener("click", exportGroupsExcel);
 });

@@ -825,9 +825,6 @@ def update_quota_table(timestamp, user_details):
     try:
         current_month = timestamp.strftime("%Y-%m")
         current_date = timestamp.strftime("%Y-%m-%d")
-        ttl = int(
-            (timestamp.replace(day=28) + timedelta(days=32)).replace(day=1).timestamp()
-        )
 
         for user in user_details:
             user_email = user["email"]
@@ -879,7 +876,6 @@ def update_quota_table(timestamp, user_details):
                         cache_write_tokens :cache_write_tokens,
                         total_cost :cost_inc
                     SET last_updated = :updated,
-                        #ttl = :ttl,
                         email = :email,
                         daily_date = :daily_date,
                         models = :models
@@ -893,13 +889,12 @@ def update_quota_table(timestamp, user_details):
                     ":cache_write_tokens": Decimal(str(cache_write_tokens)),
                     ":cost_inc": Decimal(str(cost_increment)),
                     ":updated": timestamp.isoformat().replace("+00:00", "Z"),
-                    ":ttl": ttl,
                     ":email": user_email,
                     ":daily_date": current_date,
                     ":models": existing_models,
                 }
 
-                expr_attr_names = {"#ttl": "ttl"}
+                expr_attr_names = {}
 
                 if daily_reset:
                     update_expr += ", daily_tokens = :tokens, daily_cost = :cost_inc"
@@ -914,12 +909,15 @@ def update_quota_table(timestamp, user_details):
                     expr_attr_values[":groups"] = groups
                     expr_attr_names["#groups"] = "groups"
 
-                quota_table.update_item(
-                    Key={"pk": pk, "sk": sk},
-                    UpdateExpression=update_expr,
-                    ExpressionAttributeNames=expr_attr_names,
-                    ExpressionAttributeValues=expr_attr_values,
-                )
+                update_kwargs = {
+                    "Key": {"pk": pk, "sk": sk},
+                    "UpdateExpression": update_expr,
+                    "ExpressionAttributeValues": expr_attr_values,
+                }
+                if expr_attr_names:
+                    update_kwargs["ExpressionAttributeNames"] = expr_attr_names
+
+                quota_table.update_item(**update_kwargs)
 
                 daily_note = " (daily reset)" if daily_reset else ""
                 print(f"Updated quota for {user_email}: +{tokens_to_add:,.0f} tokens, +${cost_increment:.4f} for {current_month}{daily_note}")

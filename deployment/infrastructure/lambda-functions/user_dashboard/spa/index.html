@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Code - I Miei Consumi</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="topbar"></div>
+  <div class="banner">
+    <div class="banner-logo">
+      <div class="logo-box">PI</div>
+      <div class="logo-text">Poste Italiane &nbsp;|&nbsp; <span>I Miei Consumi</span></div>
+    </div>
+    <div class="banner-right">
+      <span class="banner-email" id="banner-email"></span>
+    </div>
+  </div>
+
+  <div class="main">
+    <!-- Period Filter -->
+    <div class="filter-bar">
+      <div class="filter-group">
+        <label class="filter-label">Periodo:</label>
+        <select id="filter-mode" class="filter-select">
+          <option value="single">Mese singolo</option>
+          <option value="range">Range</option>
+        </select>
+        <select id="filter-month" class="filter-select"></select>
+        <select id="filter-from" class="filter-select" style="display:none;"></select>
+        <span id="filter-range-sep" style="display:none;"> &ndash; </span>
+        <select id="filter-to" class="filter-select" style="display:none;"></select>
+        <button class="apply-btn" id="filter-apply-btn">Applica</button>
+      </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="summary-cards" id="summary-cards">
+      <div class="summary-card blue">
+        <div class="summary-value" id="s-total-cost">-</div>
+        <div class="summary-label">Costo Periodo</div>
+      </div>
+      <div class="summary-card purple">
+        <div class="summary-value" id="s-total-tokens">-</div>
+        <div class="summary-label">Token Totali</div>
+      </div>
+      <div class="summary-card green">
+        <div class="summary-value" id="s-daily-cost">-</div>
+        <div class="summary-label">Costo Oggi</div>
+      </div>
+      <div class="summary-card orange">
+        <div class="summary-value" id="s-percentage">-</div>
+        <div class="summary-label">Quota Utilizzata</div>
+      </div>
+    </div>
+
+    <!-- Quota Progress -->
+    <div class="card" id="quota-card">
+      <h3>Quota Mensile</h3>
+      <div class="quota-progress-wrap">
+        <div class="quota-progress" id="quota-bar">
+          <div class="quota-fill" id="quota-fill"></div>
+        </div>
+        <div class="quota-labels">
+          <span>$0</span>
+          <span id="quota-limit-label">Limite: -</span>
+        </div>
+      </div>
+      <div class="quota-info" id="quota-info"></div>
+    </div>
+
+    <!-- Charts Row -->
+    <div class="charts-row">
+      <!-- Token Breakdown -->
+      <div class="card chart-card">
+        <h3>Distribuzione Token</h3>
+        <div class="chart-container" id="token-chart"></div>
+      </div>
+
+      <!-- Model Cost Breakdown -->
+      <div class="card chart-card">
+        <h3>Costo per Modello</h3>
+        <div class="chart-container" id="model-chart"></div>
+      </div>
+    </div>
+
+    <!-- Monthly Trend (visible in range mode) -->
+    <div class="card" id="trend-card" style="display:none;">
+      <h3>Trend Mensile</h3>
+      <div class="trend-container" id="trend-chart"></div>
+    </div>
+
+    <!-- Model Detail Table -->
+    <div class="card">
+      <h3>Dettaglio Modelli</h3>
+      <table id="models-table">
+        <thead>
+          <tr>
+            <th>Modello</th>
+            <th>Input</th>
+            <th>Output</th>
+            <th>Cache Read</th>
+            <th>Cache Write</th>
+            <th>Costo</th>
+            <th>%</th>
+          </tr>
+        </thead>
+        <tbody id="models-tbody">
+          <tr><td colspan="7" class="loading">Caricamento...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="footer">
+    <p>Claude Code &mdash; Poste Italiane</p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -150,7 +150,7 @@ Resources:
         KeyType: RANGE
       TimeToLiveSpecification:
         AttributeName: ttl
-        Enabled: true
+        Enabled: false
       Tags:
       - Key: Name
         Value: UserQuotaMetrics

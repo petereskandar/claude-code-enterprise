@@ -182,6 +182,15 @@ Resources:
       AuthorizerId: !Ref AdminApiAuthorizer
       Target: !Sub 'integrations/${AdminApiIntegration}'
 
+  ApiAvailableMonthsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref AdminApi
+      RouteKey: 'GET /api/available-months'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref AdminApiAuthorizer
+      Target: !Sub 'integrations/${AdminApiIntegration}'
+
   ApiUsersRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:

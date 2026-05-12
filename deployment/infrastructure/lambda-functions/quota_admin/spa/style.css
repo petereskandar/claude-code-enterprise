@@ -682,4 +682,67 @@ tr:hover td { background: #f2f8ff; }
   .ud-metrics { grid-template-columns: 1fr 1fr; gap: 8px; }
   .ud-metric-card { padding: 12px; }
   .ud-metric-value { font-size: 1em; }
+  .filter-row { flex-direction: column; gap: 8px; }
+  .filter-group { flex-wrap: wrap; }
+}
+
+/* Filter toolbar */
+.filter-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-label {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: #5d5e61;
+}
+
+.filter-select {
+  padding: 7px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.85em;
+  background: white;
+  color: #333;
+  cursor: pointer;
+}
+
+.filter-select:focus {
+  border-color: #0047bb;
+  outline: none;
+}
+
+.search-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.export-icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #6b7280;
+  padding: 4px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s, background 0.2s;
+}
+
+.export-icon-btn:hover {
+  color: #0047bb;
+  background: #e8f0fe;
 }
