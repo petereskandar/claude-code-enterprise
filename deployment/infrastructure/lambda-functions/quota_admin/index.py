@@ -12,11 +12,13 @@ ssm_client = boto3.client("ssm")
 QUOTA_TABLE = os.environ.get("QUOTA_TABLE", "UserQuotaMetrics")
 POLICIES_TABLE = os.environ.get("POLICIES_TABLE", "QuotaPolicies")
 METRICS_TABLE = os.environ.get("METRICS_TABLE", "ClaudeCodeMetrics")
+DIRECTORY_TABLE = os.environ.get("DIRECTORY_TABLE", "UserDirectory")
 ADMIN_EMAILS_PARAM = os.environ.get("ADMIN_EMAILS_PARAM", "/claude-code/quota/admin-emails")
 
 quota_table = dynamodb.Table(QUOTA_TABLE)
 policies_table = dynamodb.Table(POLICIES_TABLE)
 metrics_table = dynamodb.Table(METRICS_TABLE)
+directory_table = dynamodb.Table(DIRECTORY_TABLE)
 
 _admin_emails_cache = None
 _admin_emails_cache_time = 0
@@ -119,6 +121,7 @@ def handle_users(params):
     all_users = _get_all_users_usage(month_prefix, current_date)
     policies = _load_all_policies()
     default_policy = policies.get("default:default")
+    directory = _load_user_directory()
 
     user_list = []
     for email, usage in all_users.items():
@@ -131,12 +134,15 @@ def handle_users(params):
         pct = (cost / limit * 100) if limit > 0 else 0
         policy_type = (policy or {}).get("policy_type", "default")
 
+        dir_entry = directory.get(email, {})
         user_list.append({
             "email": email,
             "total_cost": cost,
             "limit": limit,
             "percentage": pct,
             "policy_type": policy_type,
+            "iii_livello": dir_entry.get("iii_livello", ""),
+            "business_unit": dir_entry.get("business_unit", ""),
         })
 
     user_list.sort(key=lambda x: x["total_cost"], reverse=True)
@@ -181,6 +187,8 @@ def handle_user_detail(email):
     total_cost = float(item.get("total_cost", 0))
     pct = (total_cost / monthly_cost_limit * 100) if monthly_cost_limit > 0 else 0
 
+    dir_entry = _get_user_directory_entry(email)
+
     return _response(200, {
         "email": email,
         "total_cost": total_cost,
@@ -192,6 +200,9 @@ def handle_user_detail(email):
         "cache_read_tokens": float(item.get("cache_read_tokens", 0)),
         "cache_write_tokens": float(item.get("cache_write_tokens", 0)),
         "groups": groups,
+        "iii_livello": dir_entry.get("iii_livello", ""),
+        "business_unit": dir_entry.get("business_unit", ""),
+        "nome_cognome": dir_entry.get("nome_cognome", ""),
         "policy_type": (policy or {}).get("policy_type", "default"),
         "policy_identifier": (policy or {}).get("identifier", "default"),
         "monthly_cost_limit": monthly_cost_limit,
@@ -402,6 +413,49 @@ def _resolve_policy(email, groups, all_policies, default_policy):
     if default_policy and default_policy.get("enabled", True):
         return default_policy
     return None
+
+
+def _load_user_directory():
+    directory = {}
+    try:
+        response = directory_table.scan(
+            ProjectionExpression="email, iii_livello, business_unit",
+        )
+        for item in response.get("Items", []):
+            email = item.get("email", "").lower()
+            if email:
+                directory[email] = {
+                    "iii_livello": item.get("iii_livello", ""),
+                    "business_unit": item.get("business_unit", ""),
+                }
+        while "LastEvaluatedKey" in response:
+            response = directory_table.scan(
+                ProjectionExpression="email, iii_livello, business_unit",
+                ExclusiveStartKey=response["LastEvaluatedKey"],
+            )
+            for item in response.get("Items", []):
+                email = item.get("email", "").lower()
+                if email:
+                    directory[email] = {
+                        "iii_livello": item.get("iii_livello", ""),
+                        "business_unit": item.get("business_unit", ""),
+                    }
+    except Exception as e:
+        print(f"Error loading user directory: {e}")
+    return directory
+
+
+def _get_user_directory_entry(email):
+    try:
+        response = directory_table.get_item(Key={"email": email.lower()})
+        item = response.get("Item", {})
+        return {
+            "iii_livello": item.get("iii_livello", ""),
+            "business_unit": item.get("business_unit", ""),
+            "nome_cognome": item.get("nome_cognome", ""),
+        }
+    except Exception:
+        return {}
 
 
 def _response(status, body):

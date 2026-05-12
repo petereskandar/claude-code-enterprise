@@ -32,6 +32,11 @@ Parameters:
     Default: ClaudeCodeMetrics
     Description: DynamoDB table name for raw metrics data
 
+  DirectoryTableName:
+    Type: String
+    Default: UserDirectory
+    Description: DynamoDB table name for user directory (org metadata)
+
 Resources:
   # ============================================================
   # S3 Bucket for SPA static files
@@ -287,6 +292,12 @@ Resources:
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MetricsTableName}'
               - Effect: Allow
                 Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DirectoryTableName}'
+              - Effect: Allow
+                Action:
                   - ssm:GetParameter
                 Resource:
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AdminEmailsParam}'
@@ -312,6 +323,7 @@ Resources:
           QUOTA_TABLE: !Ref QuotaMetricsTableName
           POLICIES_TABLE: !Ref PoliciesTableName
           METRICS_TABLE: !Ref MetricsTableName
+          DIRECTORY_TABLE: !Ref DirectoryTableName
           ADMIN_EMAILS_PARAM: !Ref AdminEmailsParam
       Code:
         S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut

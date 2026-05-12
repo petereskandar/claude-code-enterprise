@@ -185,7 +185,7 @@ function loadUsers() {
     var tbody = document.getElementById("users-tbody");
 
     if (!data.users || data.users.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nessun utente trovato</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Nessun utente trovato</td></tr>';
       renderPagination(0);
       return;
     }
@@ -199,6 +199,8 @@ function loadUsers() {
 
       html += "<tr>";
       html += "<td>" + escHtml(u.email) + "</td>";
+      html += "<td>" + escHtml(u.iii_livello || "") + "</td>";
+      html += "<td>" + escHtml(u.business_unit || "") + "</td>";
       html += '<td><span class="badge ' + policyCls + '">' + (u.policy_type || "default") + "</span></td>";
       html += "<td>$" + (u.total_cost || 0).toFixed(2) + "</td>";
       html += "<td>$" + (u.limit || 0).toFixed(2) + "</td>";
@@ -210,7 +212,7 @@ function loadUsers() {
     tbody.innerHTML = html;
     renderPagination(data.total);
   }).catch(function(e) {
-    document.getElementById("users-tbody").innerHTML = '<tr><td colspan="7" class="error">Errore: ' + e.message + "</td></tr>";
+    document.getElementById("users-tbody").innerHTML = '<tr><td colspan="9" class="error">Errore: ' + e.message + "</td></tr>";
   });
 }
 
@@ -285,6 +287,16 @@ function openUserDetail(email) {
     html += udMetricCard("Cache Read", formatNumber(data.cache_read_tokens || 0), "green");
     html += udMetricCard("Cache Write", formatNumber(data.cache_write_tokens || 0), "orange");
     html += '</div></div>';
+
+    // User info section
+    if (data.nome_cognome || data.iii_livello || data.business_unit) {
+      html += '<div class="detail-section"><h4>Informazioni Utente</h4>';
+      html += '<div class="ud-policy-card">';
+      if (data.nome_cognome) html += '<div class="ud-policy-row"><span class="ud-policy-label">Nome</span><span class="ud-policy-value">' + escHtml(data.nome_cognome) + '</span></div>';
+      if (data.iii_livello) html += '<div class="ud-policy-row"><span class="ud-policy-label">III Livello</span><span class="ud-policy-value">' + escHtml(data.iii_livello) + '</span></div>';
+      if (data.business_unit) html += '<div class="ud-policy-row"><span class="ud-policy-label">Business Unit</span><span class="ud-policy-value">' + escHtml(data.business_unit) + '</span></div>';
+      html += '</div></div>';
+    }
 
     // Policy section
     var polType = data.policy_type || "default";
