@@ -195,16 +195,8 @@ def _build_log_events(arn_to_profile: dict, bedrock_metrics: dict, timestamp: da
                 continue
 
             dimensions = [
-                ["type"],
-                ["model"],
-                ["user.email"],
-                ["type", "model"],
-                ["type", "user.email"],
+                ["model", "type"],
             ]
-            if group:
-                dimensions.append(["user.group"])
-                dimensions.append(["user.group", "type"])
-                dimensions.append(["user.group", "model"])
 
             record = {
                 "_aws": {

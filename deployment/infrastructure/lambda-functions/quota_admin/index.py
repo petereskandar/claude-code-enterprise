@@ -12,13 +12,17 @@ ssm_client = boto3.client("ssm")
 QUOTA_TABLE = os.environ.get("QUOTA_TABLE", "UserQuotaMetrics")
 POLICIES_TABLE = os.environ.get("POLICIES_TABLE", "QuotaPolicies")
 METRICS_TABLE = os.environ.get("METRICS_TABLE", "ClaudeCodeMetrics")
+DIRECTORY_TABLE = os.environ.get("DIRECTORY_TABLE", "UserDirectory")
 ADMIN_EMAILS_PARAM = os.environ.get("ADMIN_EMAILS_PARAM", "/claude-code/quota/admin-emails")
 
 quota_table = dynamodb.Table(QUOTA_TABLE)
 policies_table = dynamodb.Table(POLICIES_TABLE)
 metrics_table = dynamodb.Table(METRICS_TABLE)
+directory_table = dynamodb.Table(DIRECTORY_TABLE)
 
 _admin_emails_cache = None
+_admin_emails_cache_time = 0
+_ADMIN_CACHE_TTL = 300
 
 
 def handler(event, context):
@@ -33,15 +37,20 @@ def handler(event, context):
 
     try:
         if path == "/api/overview" and method == "GET":
-            return handle_overview()
+            params = event.get("queryStringParameters") or {}
+            return handle_overview(params)
+        elif path == "/api/available-months" and method == "GET":
+            return handle_available_months()
         elif path == "/api/users" and method == "GET":
             params = event.get("queryStringParameters") or {}
             return handle_users(params)
         elif path.startswith("/api/users/") and method == "GET":
             email = unquote(path.split("/api/users/")[1])
-            return handle_user_detail(email)
+            params = event.get("queryStringParameters") or {}
+            return handle_user_detail(email, params)
         elif path == "/api/groups" and method == "GET":
-            return handle_groups()
+            params = event.get("queryStringParameters") or {}
+            return handle_groups(params)
         elif path == "/api/policies" and method == "GET":
             return handle_policies()
         elif path.startswith("/api/policies/") and method == "PUT":
@@ -68,11 +77,15 @@ def handler(event, context):
         return _response(500, {"error": str(e)})
 
 
-def handle_overview():
-    month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
-    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def handle_overview(params):
+    month = params.get("month")
+    month_from = params.get("from")
+    month_to = params.get("to")
 
-    users = _get_all_users_usage(month_prefix, current_date)
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    months = _resolve_months(month, month_from, month_to)
+
+    users = _get_all_users_usage_multi(months, current_date)
     policies = _load_all_policies()
     default_policy = policies.get("default:default")
 
@@ -87,7 +100,8 @@ def handle_overview():
         groups = usage.get("groups", [])
         policy = _resolve_policy(email, groups, policies, default_policy)
         limit = (policy or {}).get("monthly_cost_limit", 0)
-        pct = (cost / limit * 100) if limit > 0 else 0
+        limit_for_range = limit * len(months) if limit > 0 else 0
+        pct = (cost / limit_for_range * 100) if limit_for_range > 0 else 0
         if pct > 100:
             over_quota += 1
         enforcement = (policy or {}).get("enforcement_mode", "alert")
@@ -103,20 +117,56 @@ def handle_overview():
         "over_quota": over_quota,
         "blocked": blocked,
         "top_consumers": user_costs[:10],
+        "months": months,
     })
+
+
+def handle_available_months():
+    months = set()
+    try:
+        response = quota_table.scan(
+            ProjectionExpression="sk",
+            FilterExpression=Attr("sk").begins_with("MONTH#"),
+        )
+
+        def _extract(items):
+            for item in items:
+                sk = item.get("sk", "")
+                if sk.startswith("MONTH#"):
+                    months.add(sk.replace("MONTH#", ""))
+
+        _extract(response.get("Items", []))
+        while "LastEvaluatedKey" in response:
+            response = quota_table.scan(
+                ProjectionExpression="sk",
+                FilterExpression=Attr("sk").begins_with("MONTH#"),
+                ExclusiveStartKey=response["LastEvaluatedKey"],
+            )
+            _extract(response.get("Items", []))
+    except Exception as e:
+        print(f"Error fetching available months: {e}")
+
+    sorted_months = sorted(months, reverse=True)
+    return _response(200, {"months": sorted_months})
 
 
 def handle_users(params):
     page = int(params.get("page", 1))
     page_size = int(params.get("page_size", 20))
+    export_all = params.get("export") == "true"
     search = params.get("search", "").lower().strip()
 
-    month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
-    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    month = params.get("month")
+    month_from = params.get("from")
+    month_to = params.get("to")
 
-    all_users = _get_all_users_usage(month_prefix, current_date)
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    months = _resolve_months(month, month_from, month_to)
+
+    all_users = _get_all_users_usage_multi(months, current_date)
     policies = _load_all_policies()
     default_policy = policies.get("default:default")
+    directory = _load_user_directory()
 
     user_list = []
     for email, usage in all_users.items():
@@ -125,20 +175,34 @@ def handle_users(params):
         groups = usage.get("groups", [])
         policy = _resolve_policy(email, groups, policies, default_policy)
         limit = (policy or {}).get("monthly_cost_limit", 0)
+        limit_for_range = limit * len(months) if limit > 0 else 0
         cost = usage.get("total_cost", 0)
-        pct = (cost / limit * 100) if limit > 0 else 0
+        pct = (cost / limit_for_range * 100) if limit_for_range > 0 else 0
         policy_type = (policy or {}).get("policy_type", "default")
 
+        dir_entry = directory.get(email, {})
         user_list.append({
             "email": email,
             "total_cost": cost,
-            "limit": limit,
+            "total_tokens": usage.get("total_tokens", 0),
+            "limit": limit_for_range,
             "percentage": pct,
             "policy_type": policy_type,
+            "iii_livello": dir_entry.get("iii_livello", ""),
+            "business_unit": dir_entry.get("business_unit", ""),
+            "nome_cognome": dir_entry.get("nome_cognome", ""),
         })
 
     user_list.sort(key=lambda x: x["total_cost"], reverse=True)
     total = len(user_list)
+
+    if export_all:
+        return _response(200, {
+            "users": user_list,
+            "total": total,
+            "months": months,
+        })
+
     start = (page - 1) * page_size
     end = start + page_size
 
@@ -147,63 +211,103 @@ def handle_users(params):
         "total": total,
         "page": page,
         "page_size": page_size,
+        "months": months,
     })
 
 
-def handle_user_detail(email):
-    month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
+def handle_user_detail(email, params=None):
+    params = params or {}
+    month = params.get("month")
+    month_from = params.get("from")
+    month_to = params.get("to")
+
     current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    months = _resolve_months(month, month_from, month_to)
 
-    try:
-        response = quota_table.get_item(Key={"pk": f"USER#{email}", "sk": f"MONTH#{month_prefix}"})
-        item = response.get("Item")
-    except Exception:
-        item = None
+    total_cost = 0.0
+    total_tokens = 0.0
+    input_tokens = 0.0
+    output_tokens = 0.0
+    cache_read_tokens = 0.0
+    cache_write_tokens = 0.0
+    daily_cost = 0.0
+    daily_tokens = 0.0
+    groups = []
+    found = False
 
-    if not item:
-        return _response(404, {"error": "User not found for current month"})
+    for m in months:
+        try:
+            response = quota_table.get_item(Key={"pk": f"USER#{email}", "sk": f"MONTH#{m}"})
+            item = response.get("Item")
+        except Exception:
+            item = None
+        if not item:
+            continue
+        found = True
+        total_cost += float(item.get("total_cost", 0))
+        total_tokens += float(item.get("total_tokens", 0))
+        input_tokens += float(item.get("input_tokens", 0))
+        output_tokens += float(item.get("output_tokens", 0))
+        cache_read_tokens += float(item.get("cache_read_tokens", 0))
+        cache_write_tokens += float(item.get("cache_write_tokens", 0))
+        if not groups:
+            groups = item.get("groups", [])
+        if m == months[-1]:
+            d_cost = float(item.get("daily_cost", 0))
+            d_tokens = float(item.get("daily_tokens", 0))
+            if item.get("daily_date") == current_date:
+                daily_cost = d_cost
+                daily_tokens = d_tokens
 
-    daily_cost = float(item.get("daily_cost", 0))
-    daily_tokens = float(item.get("daily_tokens", 0))
-    if item.get("daily_date") != current_date:
-        daily_cost = 0.0
-        daily_tokens = 0.0
+    if not found:
+        return _response(404, {"error": "User not found for selected period"})
 
-    groups = item.get("groups", [])
     policies = _load_all_policies()
     default_policy = policies.get("default:default")
     policy = _resolve_policy(email, groups, policies, default_policy)
 
     monthly_cost_limit = (policy or {}).get("monthly_cost_limit", 0)
+    limit_for_range = monthly_cost_limit * len(months) if monthly_cost_limit > 0 else 0
     daily_cost_limit = (policy or {}).get("daily_cost_limit")
-    total_cost = float(item.get("total_cost", 0))
-    pct = (total_cost / monthly_cost_limit * 100) if monthly_cost_limit > 0 else 0
+    pct = (total_cost / limit_for_range * 100) if limit_for_range > 0 else 0
+
+    dir_entry = _get_user_directory_entry(email)
 
     return _response(200, {
         "email": email,
         "total_cost": total_cost,
         "daily_cost": daily_cost,
-        "total_tokens": float(item.get("total_tokens", 0)),
+        "total_tokens": total_tokens,
         "daily_tokens": daily_tokens,
-        "input_tokens": float(item.get("input_tokens", 0)),
-        "output_tokens": float(item.get("output_tokens", 0)),
-        "cache_read_tokens": float(item.get("cache_read_tokens", 0)),
-        "cache_write_tokens": float(item.get("cache_write_tokens", 0)),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
         "groups": groups,
+        "iii_livello": dir_entry.get("iii_livello", ""),
+        "business_unit": dir_entry.get("business_unit", ""),
+        "nome_cognome": dir_entry.get("nome_cognome", ""),
         "policy_type": (policy or {}).get("policy_type", "default"),
         "policy_identifier": (policy or {}).get("identifier", "default"),
-        "monthly_cost_limit": monthly_cost_limit,
+        "monthly_cost_limit": limit_for_range,
         "daily_cost_limit": daily_cost_limit,
         "enforcement_mode": (policy or {}).get("enforcement_mode", "alert"),
         "percentage": pct,
+        "months": months,
     })
 
 
-def handle_groups():
-    month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
-    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def handle_groups(params=None):
+    params = params or {}
+    month = params.get("month")
+    month_from = params.get("from")
+    month_to = params.get("to")
+    export_all = params.get("export") == "true"
 
-    all_users = _get_all_users_usage(month_prefix, current_date)
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    months = _resolve_months(month, month_from, month_to)
+
+    all_users = _get_all_users_usage_multi(months, current_date)
     policies = _load_all_policies()
 
     groups_map = {}
@@ -227,7 +331,7 @@ def handle_groups():
 
     groups_list = sorted(groups_map.values(), key=lambda x: x["total_cost"], reverse=True)
 
-    return _response(200, {"groups": groups_list})
+    return _response(200, {"groups": groups_list, "months": months})
 
 
 def handle_policies():
@@ -289,56 +393,86 @@ def _get_caller_email(event):
 
 
 def _is_admin(email):
-    global _admin_emails_cache
-    if _admin_emails_cache is None:
+    import time
+    global _admin_emails_cache, _admin_emails_cache_time
+    now = time.time()
+    if _admin_emails_cache is None or (now - _admin_emails_cache_time) > _ADMIN_CACHE_TTL:
         try:
             response = ssm_client.get_parameter(Name=ADMIN_EMAILS_PARAM)
             raw = response["Parameter"]["Value"]
             _admin_emails_cache = [e.strip().lower() for e in raw.split(",") if e.strip()]
+            _admin_emails_cache_time = now
         except Exception as e:
             print(f"Error reading admin emails: {e}")
-            _admin_emails_cache = []
+            if _admin_emails_cache is None:
+                _admin_emails_cache = []
     return email.lower() in _admin_emails_cache
 
 
-def _get_all_users_usage(month_prefix, current_date):
+def _resolve_months(month, month_from, month_to):
+    if month_from and month_to:
+        months = []
+        current = month_from
+        while current <= month_to:
+            months.append(current)
+            y, m = int(current[:4]), int(current[5:7])
+            m += 1
+            if m > 12:
+                m = 1
+                y += 1
+            current = f"{y:04d}-{m:02d}"
+        return months
+    elif month:
+        return [month]
+    else:
+        return [datetime.now(timezone.utc).strftime("%Y-%m")]
+
+
+def _get_all_users_usage_multi(months, current_date):
     users = {}
-    try:
-        response = quota_table.scan(
-            FilterExpression=Attr("sk").eq(f"MONTH#{month_prefix}"),
-            ProjectionExpression="pk, email, total_tokens, daily_tokens, daily_date, total_cost, daily_cost, #g",
-            ExpressionAttributeNames={"#g": "groups"},
-        )
-
-        def _process(items):
-            for item in items:
-                email = item.get("email")
-                if not email:
-                    continue
-                daily_cost = float(item.get("daily_cost", 0))
-                daily_tokens = float(item.get("daily_tokens", 0))
-                if item.get("daily_date") != current_date:
-                    daily_cost = 0
-                    daily_tokens = 0
-                users[email] = {
-                    "total_cost": float(item.get("total_cost", 0)),
-                    "daily_cost": daily_cost,
-                    "total_tokens": float(item.get("total_tokens", 0)),
-                    "daily_tokens": daily_tokens,
-                    "groups": item.get("groups", []),
-                }
-
-        _process(response.get("Items", []))
-        while "LastEvaluatedKey" in response:
+    for month_prefix in months:
+        try:
             response = quota_table.scan(
                 FilterExpression=Attr("sk").eq(f"MONTH#{month_prefix}"),
                 ProjectionExpression="pk, email, total_tokens, daily_tokens, daily_date, total_cost, daily_cost, #g",
                 ExpressionAttributeNames={"#g": "groups"},
-                ExclusiveStartKey=response["LastEvaluatedKey"],
             )
+
+            def _process(items):
+                for item in items:
+                    email = item.get("email")
+                    if not email:
+                        continue
+                    cost = float(item.get("total_cost", 0))
+                    tokens = float(item.get("total_tokens", 0))
+
+                    if email not in users:
+                        users[email] = {
+                            "total_cost": 0,
+                            "total_tokens": 0,
+                            "daily_cost": 0,
+                            "daily_tokens": 0,
+                            "groups": [],
+                        }
+                    users[email]["total_cost"] += cost
+                    users[email]["total_tokens"] += tokens
+                    if not users[email]["groups"]:
+                        users[email]["groups"] = item.get("groups", [])
+                    if item.get("daily_date") == current_date:
+                        users[email]["daily_cost"] = float(item.get("daily_cost", 0))
+                        users[email]["daily_tokens"] = float(item.get("daily_tokens", 0))
+
             _process(response.get("Items", []))
-    except Exception as e:
-        print(f"Error fetching users: {e}")
+            while "LastEvaluatedKey" in response:
+                response = quota_table.scan(
+                    FilterExpression=Attr("sk").eq(f"MONTH#{month_prefix}"),
+                    ProjectionExpression="pk, email, total_tokens, daily_tokens, daily_date, total_cost, daily_cost, #g",
+                    ExpressionAttributeNames={"#g": "groups"},
+                    ExclusiveStartKey=response["LastEvaluatedKey"],
+                )
+                _process(response.get("Items", []))
+        except Exception as e:
+            print(f"Error fetching users for {month_prefix}: {e}")
     return users
 
 
@@ -396,6 +530,51 @@ def _resolve_policy(email, groups, all_policies, default_policy):
     if default_policy and default_policy.get("enabled", True):
         return default_policy
     return None
+
+
+def _load_user_directory():
+    directory = {}
+    try:
+        response = directory_table.scan(
+            ProjectionExpression="email, iii_livello, business_unit, nome_cognome",
+        )
+        for item in response.get("Items", []):
+            email = item.get("email", "").lower()
+            if email:
+                directory[email] = {
+                    "iii_livello": item.get("iii_livello", ""),
+                    "business_unit": item.get("business_unit", ""),
+                    "nome_cognome": item.get("nome_cognome", ""),
+                }
+        while "LastEvaluatedKey" in response:
+            response = directory_table.scan(
+                ProjectionExpression="email, iii_livello, business_unit, nome_cognome",
+                ExclusiveStartKey=response["LastEvaluatedKey"],
+            )
+            for item in response.get("Items", []):
+                email = item.get("email", "").lower()
+                if email:
+                    directory[email] = {
+                        "iii_livello": item.get("iii_livello", ""),
+                        "business_unit": item.get("business_unit", ""),
+                        "nome_cognome": item.get("nome_cognome", ""),
+                    }
+    except Exception as e:
+        print(f"Error loading user directory: {e}")
+    return directory
+
+
+def _get_user_directory_entry(email):
+    try:
+        response = directory_table.get_item(Key={"email": email.lower()})
+        item = response.get("Item", {})
+        return {
+            "iii_livello": item.get("iii_livello", ""),
+            "business_unit": item.get("business_unit", ""),
+            "nome_cognome": item.get("nome_cognome", ""),
+        }
+    except Exception:
+        return {}
 
 
 def _response(status, body):

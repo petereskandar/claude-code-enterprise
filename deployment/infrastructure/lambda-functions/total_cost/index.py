@@ -15,10 +15,6 @@ _pricing_cache = None
 _pricing_cache_time = 0.0
 CACHE_TTL_SECONDS = 3600
 
-# Cache ARN → resolved model ID (application inference profiles)
-_profile_cache = {}
-
-
 def get_pricing(ssm_client, param_name):
     global _pricing_cache, _pricing_cache_time
     now = time.monotonic()
@@ -29,34 +25,6 @@ def get_pricing(ssm_client, param_name):
         print(f"Refreshed pricing from SSM — models: {list(_pricing_cache.get('models', {}).keys())}")
     return _pricing_cache
 
-
-def resolve_model_id(bedrock_client, model_id):
-    """
-    Resolve an ARN (application or cross-region inference profile) to a base model ID.
-    Returns the model_id unchanged if it is already a plain model string.
-    """
-    if not model_id.startswith('arn:'):
-        return model_id
-
-    if model_id in _profile_cache:
-        return _profile_cache[model_id]
-
-    try:
-        resp = bedrock_client.get_inference_profile(inferenceProfileIdentifier=model_id)
-        # models[] list — each entry has modelArn; pick the first
-        models = resp.get('models', [])
-        if models:
-            model_arn = models[0].get('modelArn', '')
-            # modelArn is like arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-7
-            resolved = model_arn.split('/')[-1] if '/' in model_arn else model_arn
-            print(f"Resolved profile {model_id} → {resolved}")
-            _profile_cache[model_id] = resolved
-            return resolved
-    except Exception as e:
-        print(f"Could not resolve inference profile {model_id}: {e}")
-
-    _profile_cache[model_id] = model_id  # negative cache to avoid repeated calls
-    return model_id
 
 
 def get_model_pricing(pricing, model_id):
@@ -124,13 +92,8 @@ def lambda_handler(event, context):
     width = widget_size.get('width', 300)
     height = widget_size.get('height', 200)
 
-    # CloudWatch Metrics (ClaudeCode namespace) are published by the aggregator in
-    # the Lambda's own region, NOT in METRICS_REGION (which is the Logs region).
     cloudwatch_client = boto3.client('cloudwatch')
-    # SSM parameter lives in the same region as the Lambda (stack region)
     ssm_client = boto3.client('ssm')
-    # Bedrock inference profiles are in METRICS_REGION
-    bedrock_client = boto3.client('bedrock', region_name=region)
 
     try:
         if 'start' in time_range and 'end' in time_range:
@@ -151,37 +114,41 @@ def lambda_handler(event, context):
             dps = get_metric_statistics(cloudwatch_client, metric_name, start_time, end_time, dimensions, 'Sum', period)
             return sum(p.get('Sum', 0) for p in dps) if dps else 0
 
-        # Discover which model IDs have per-model dimensional metrics
+        # Discover which models have usage via claude_code.token.usage metric
+        # (published by Bridge with dimensions ["model", "type"])
         models_in_cw = set()
         paginator = cloudwatch_client.get_paginator('list_metrics')
         for page in paginator.paginate(
             Namespace='ClaudeCode',
-            MetricName='InputTokens',
-            Dimensions=[{'Name': 'ModelId'}]
+            MetricName='claude_code.token.usage',
+            Dimensions=[{'Name': 'model'}]
         ):
             for m in page.get('Metrics', []):
                 for d in m.get('Dimensions', []):
-                    if d['Name'] == 'ModelId':
+                    if d['Name'] == 'model':
                         models_in_cw.add(d['Value'])
 
         model_costs = {}
         total_cost = 0.0
 
+        token_type_map = [
+            ("input",         "input_per_million"),
+            ("output",        "output_per_million"),
+            ("cacheRead",     "cache_read_per_million"),
+            ("cacheCreation", "cache_write_per_million"),
+        ]
+
         if models_in_cw:
-            # Per-model cost: each model × its own pricing
             for model_id in sorted(models_in_cw):
-                # Resolve inference profile ARN → underlying base model for pricing lookup
-                base_model = resolve_model_id(bedrock_client, model_id)
-                dims = [{'Name': 'ModelId', 'Value': model_id}]
-                p = get_model_pricing(pricing, base_model)
-                inp = sum_metric('InputTokens', dims)
-                out = sum_metric('OutputTokens', dims)
-                cr  = sum_metric('CacheReadTokens', dims)
-                cw  = sum_metric('CacheCreationTokens', dims)
-                cost = (inp / 1e6 * p.get('input_per_million', 3.0)
-                      + out / 1e6 * p.get('output_per_million', 15.0)
-                      + cr  / 1e6 * p.get('cache_read_per_million', 0.30)
-                      + cw  / 1e6 * p.get('cache_write_per_million', 3.75))
+                p = get_model_pricing(pricing, model_id)
+                cost = 0.0
+                for token_type, price_key in token_type_map:
+                    dims = [
+                        {'Name': 'model', 'Value': model_id},
+                        {'Name': 'type', 'Value': token_type},
+                    ]
+                    tokens = sum_metric('claude_code.token.usage', dims)
+                    cost += tokens / 1e6 * p.get(price_key, 3.0)
                 model_costs[model_id] = cost
                 total_cost += cost
         else:

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Claude Code - Quota Admin Dashboard</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <div class="topbar"></div>
@@ -74,27 +74,45 @@
       <!-- Users Tab -->
       <div id="tab-users" class="tab-content">
         <div class="toolbar">
-          <div class="search-box">
-            <input type="text" id="user-search" placeholder="Cerca utente per email..." autocomplete="off">
-            <button class="search-btn" id="user-search-btn">Cerca</button>
+          <div class="filter-row">
+            <div class="filter-group">
+              <label class="filter-label">Periodo:</label>
+              <select id="filter-mode" class="filter-select">
+                <option value="single">Mese singolo</option>
+                <option value="range">Range</option>
+              </select>
+              <select id="filter-month" class="filter-select"></select>
+              <select id="filter-from" class="filter-select" style="display:none;"></select>
+              <span id="filter-range-sep" style="display:none;"> &ndash; </span>
+              <select id="filter-to" class="filter-select" style="display:none;"></select>
+              <button class="action-btn" id="filter-apply-btn">Applica</button>
+            </div>
           </div>
-          <div class="pagination" id="users-pagination"></div>
+          <div class="search-row">
+            <div class="search-box">
+              <input type="text" id="user-search" placeholder="Cerca utente per email..." autocomplete="off">
+              <button class="search-btn" id="user-search-btn">Cerca</button>
+            </div>
+            <div class="pagination" id="users-pagination"></div>
+          </div>
         </div>
         <div class="card">
           <table id="users-table">
             <thead>
               <tr>
                 <th>Email</th>
+                <th>III Livello</th>
+                <th>Business Unit</th>
                 <th>Policy</th>
                 <th>Costo Mese</th>
                 <th>Limite</th>
                 <th>Utilizzo</th>
                 <th>Stato</th>
-                <th></th>
+                <th><button class="export-icon-btn" id="export-users-btn" title="Scarica Excel"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></th>
               </tr>
             </thead>
             <tbody id="users-tbody">
-              <tr><td colspan="7" class="loading">Caricamento...</td></tr>
+              <tr><td colspan="9" class="loading">Caricamento...</td></tr>
             </tbody>
           </table>
         </div>
@@ -102,6 +120,22 @@
 
       <!-- Groups Tab -->
       <div id="tab-groups" class="tab-content">
+        <div class="toolbar">
+          <div class="filter-row">
+            <div class="filter-group">
+              <label class="filter-label">Periodo:</label>
+              <select id="groups-filter-mode" class="filter-select">
+                <option value="single">Mese singolo</option>
+                <option value="range">Range</option>
+              </select>
+              <select id="groups-filter-month" class="filter-select"></select>
+              <select id="groups-filter-from" class="filter-select" style="display:none;"></select>
+              <span id="groups-filter-range-sep" style="display:none;"> &ndash; </span>
+              <select id="groups-filter-to" class="filter-select" style="display:none;"></select>
+              <button class="action-btn" id="groups-filter-apply-btn">Applica</button>
+            </div>
+          </div>
+        </div>
         <div class="card">
           <table id="groups-table">
             <thead>
@@ -111,7 +145,7 @@
                 <th>Costo Totale</th>
                 <th>Limite Mensile</th>
                 <th>Enforcement</th>
-                <th></th>
+                <th><button class="export-icon-btn" id="export-groups-btn" title="Scarica Excel"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></th>
               </tr>
             </thead>
             <tbody id="groups-tbody">

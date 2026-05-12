@@ -12,7 +12,16 @@ var state = {
   usersPage: 1,
   usersPageSize: 20,
   usersTotal: 0,
-  usersSearch: ""
+  usersSearch: "",
+  availableMonths: [],
+  filterMode: "single",
+  filterMonth: null,
+  filterFrom: null,
+  filterTo: null,
+  groupsFilterMode: "single",
+  groupsFilterMonth: null,
+  groupsFilterFrom: null,
+  groupsFilterTo: null,
 };
 
 // ============================================================
@@ -69,7 +78,74 @@ function showDashboard() {
   document.getElementById("dashboard-section").style.display = "block";
   document.getElementById("banner-email").textContent = state.email;
   document.getElementById("logout-btn").style.display = "flex";
-  loadOverview();
+  loadAvailableMonths().then(function() { loadOverview(); });
+}
+
+function loadAvailableMonths() {
+  return apiCall("/api/available-months").then(function(data) {
+    state.availableMonths = data.months || [];
+    if (state.availableMonths.length > 0 && !state.filterMonth) {
+      state.filterMonth = state.availableMonths[0];
+      state.groupsFilterMonth = state.availableMonths[0];
+    }
+    populateMonthSelects();
+  }).catch(function() {
+    var now = new Date();
+    var current = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+    state.availableMonths = [current];
+    state.filterMonth = current;
+    state.groupsFilterMonth = current;
+    populateMonthSelects();
+  });
+}
+
+function populateMonthSelects() {
+  var ids = ["filter-month", "filter-from", "filter-to", "groups-filter-month", "groups-filter-from", "groups-filter-to"];
+  ids.forEach(function(id) {
+    var sel = document.getElementById(id);
+    if (!sel) return;
+    sel.innerHTML = "";
+    state.availableMonths.forEach(function(m) {
+      var opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = formatMonthLabel(m);
+      sel.appendChild(opt);
+    });
+  });
+  if (state.filterMonth) document.getElementById("filter-month").value = state.filterMonth;
+  if (state.groupsFilterMonth) document.getElementById("groups-filter-month").value = state.groupsFilterMonth;
+  if (state.availableMonths.length > 1) {
+    document.getElementById("filter-from").value = state.availableMonths[state.availableMonths.length - 1];
+    document.getElementById("filter-to").value = state.availableMonths[0];
+    document.getElementById("groups-filter-from").value = state.availableMonths[state.availableMonths.length - 1];
+    document.getElementById("groups-filter-to").value = state.availableMonths[0];
+  }
+}
+
+function formatMonthLabel(m) {
+  var parts = m.split("-");
+  var names = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
+  return names[parseInt(parts[1]) - 1] + " " + parts[0];
+}
+
+function toggleFilterMode(prefix) {
+  var mode = document.getElementById(prefix + "filter-mode").value;
+  var isSingle = mode === "single";
+  document.getElementById(prefix + "filter-month").style.display = isSingle ? "" : "none";
+  document.getElementById(prefix + "filter-from").style.display = isSingle ? "none" : "";
+  document.getElementById(prefix + "filter-range-sep").style.display = isSingle ? "none" : "";
+  document.getElementById(prefix + "filter-to").style.display = isSingle ? "none" : "";
+}
+
+function getFilterParams(prefix) {
+  var mode = document.getElementById(prefix + "filter-mode").value;
+  if (mode === "single") {
+    return "month=" + document.getElementById(prefix + "filter-month").value;
+  } else {
+    var from = document.getElementById(prefix + "filter-from").value;
+    var to = document.getElementById(prefix + "filter-to").value;
+    return "from=" + from + "&to=" + to;
+  }
 }
 
 function logout() {
@@ -99,10 +175,18 @@ function apiCall(path, method, body) {
   if (body) opts.body = JSON.stringify(body);
 
   return fetch(CONFIG.API_BASE + path, opts).then(function(resp) {
-    if (resp.status === 401 || resp.status === 403) {
+    if (resp.status === 401) {
       sessionStorage.clear();
       window.location.href = getAuthUrl();
       return Promise.reject(new Error("Unauthorized"));
+    }
+    if (resp.status === 403) {
+      document.getElementById("dashboard-section").innerHTML =
+        '<div style="text-align:center;padding:60px 20px;">' +
+        '<h2 style="color:#c62828;margin-bottom:12px;">Accesso Negato</h2>' +
+        '<p style="color:#5d5e61;">Il tuo account (' + state.email + ') non è autorizzato ad accedere a questa console.</p>' +
+        '<p style="color:#5d5e61;margin-top:8px;">Contatta un amministratore per richiedere l\'accesso.</p></div>';
+      return Promise.reject(new Error("Forbidden"));
     }
     if (!resp.ok) {
       return Promise.reject(new Error("API " + resp.status));
@@ -137,7 +221,8 @@ function initTabs() {
 // Overview
 // ============================================================
 function loadOverview() {
-  apiCall("/api/overview").then(function(data) {
+  var params = "?" + getFilterParams("");
+  apiCall("/api/overview" + params).then(function(data) {
     document.getElementById("stat-total-users").textContent = data.total_users || 0;
     document.getElementById("stat-total-cost").textContent = "$" + (data.total_cost || 0).toFixed(2);
     document.getElementById("stat-over-quota").textContent = data.over_quota || 0;
@@ -171,13 +256,14 @@ function loadOverview() {
 function loadUsers() {
   var params = "?page=" + state.usersPage + "&page_size=" + state.usersPageSize;
   if (state.usersSearch) params += "&search=" + encodeURIComponent(state.usersSearch);
+  params += "&" + getFilterParams("");
 
   apiCall("/api/users" + params).then(function(data) {
     state.usersTotal = data.total || 0;
     var tbody = document.getElementById("users-tbody");
 
     if (!data.users || data.users.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Nessun utente trovato</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Nessun utente trovato</td></tr>';
       renderPagination(0);
       return;
     }
@@ -191,6 +277,8 @@ function loadUsers() {
 
       html += "<tr>";
       html += "<td>" + escHtml(u.email) + "</td>";
+      html += "<td>" + escHtml(u.iii_livello || "") + "</td>";
+      html += "<td>" + escHtml(u.business_unit || "") + "</td>";
       html += '<td><span class="badge ' + policyCls + '">' + (u.policy_type || "default") + "</span></td>";
       html += "<td>$" + (u.total_cost || 0).toFixed(2) + "</td>";
       html += "<td>$" + (u.limit || 0).toFixed(2) + "</td>";
@@ -202,7 +290,7 @@ function loadUsers() {
     tbody.innerHTML = html;
     renderPagination(data.total);
   }).catch(function(e) {
-    document.getElementById("users-tbody").innerHTML = '<tr><td colspan="7" class="error">Errore: ' + e.message + "</td></tr>";
+    document.getElementById("users-tbody").innerHTML = '<tr><td colspan="9" class="error">Errore: ' + e.message + "</td></tr>";
   });
 }
 
@@ -235,41 +323,87 @@ function openUserDetail(email) {
   document.getElementById("modal-user-email").textContent = email;
   document.getElementById("modal-body").innerHTML = '<div class="loading">Caricamento...</div>';
 
-  apiCall("/api/users/" + encodeURIComponent(email)).then(function(data) {
+  var detailParams = "?" + getFilterParams("");
+  apiCall("/api/users/" + encodeURIComponent(email) + detailParams).then(function(data) {
     var html = '';
+    var pct = data.percentage || 0;
+    var pctCls = pct > 100 ? "critical" : (pct > 80 ? "warning" : "ok");
+    var statusText = pct > 100 ? "Quota Superata" : (pct > 90 ? "Critico" : (pct > 80 ? "Attenzione" : "In Regola"));
+    var statusIcon = pct > 100 ? "&#x26D4;" : (pct > 80 ? "&#x26A0;" : "&#x2705;");
 
-    // Usage section
-    html += '<div class="detail-section"><h4>Consumi Mese Corrente</h4>';
-    html += '<div class="detail-grid">';
-    html += detailItem("Costo Totale", "$" + (data.total_cost || 0).toFixed(2));
-    html += detailItem("Costo Giornaliero", "$" + (data.daily_cost || 0).toFixed(2));
-    html += detailItem("Token Totali", formatNumber(data.total_tokens || 0));
-    html += detailItem("Token Giornalieri", formatNumber(data.daily_tokens || 0));
-    html += detailItem("Input Tokens", formatNumber(data.input_tokens || 0));
-    html += detailItem("Output Tokens", formatNumber(data.output_tokens || 0));
-    html += detailItem("Cache Read", formatNumber(data.cache_read_tokens || 0));
-    html += detailItem("Cache Write", formatNumber(data.cache_write_tokens || 0));
-    html += "</div></div>";
+    // Usage summary banner
+    html += '<div class="ud-summary ud-summary-' + pctCls + '">';
+    html += '<div class="ud-summary-left">';
+    html += '<div class="ud-summary-cost">$' + (data.total_cost || 0).toFixed(2) + '</div>';
+    html += '<div class="ud-summary-label">costo mese corrente</div>';
+    html += '</div>';
+    html += '<div class="ud-summary-right">';
+    html += '<div class="ud-summary-pct">' + pct.toFixed(1) + '%</div>';
+    html += '<div class="ud-summary-status">' + statusIcon + ' ' + statusText + '</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // Progress bar
+    html += '<div class="ud-progress-wrap">';
+    html += '<div class="ud-progress"><div class="ud-progress-fill ' + pctCls + '" style="width:' + Math.min(pct, 100) + '%"></div></div>';
+    html += '<div class="ud-progress-labels"><span>$0</span><span>Limite: ' + (data.monthly_cost_limit ? "$" + data.monthly_cost_limit.toFixed(2) : "N/A") + '</span></div>';
+    html += '</div>';
+
+    // Cost metrics cards
+    html += '<div class="detail-section"><h4>Consumi</h4>';
+    html += '<div class="ud-metrics">';
+    html += udMetricCard("Costo Totale", "$" + (data.total_cost || 0).toFixed(2), "blue");
+    html += udMetricCard("Costo Oggi", "$" + (data.daily_cost || 0).toFixed(2), "blue");
+    html += udMetricCard("Token Totali", formatNumber(data.total_tokens || 0), "purple");
+    html += udMetricCard("Token Oggi", formatNumber(data.daily_tokens || 0), "purple");
+    html += '</div></div>';
+
+    // Token breakdown
+    html += '<div class="detail-section"><h4>Dettaglio Token</h4>';
+    html += '<div class="ud-metrics">';
+    html += udMetricCard("Input", formatNumber(data.input_tokens || 0), "gray");
+    html += udMetricCard("Output", formatNumber(data.output_tokens || 0), "gray");
+    html += udMetricCard("Cache Read", formatNumber(data.cache_read_tokens || 0), "green");
+    html += udMetricCard("Cache Write", formatNumber(data.cache_write_tokens || 0), "orange");
+    html += '</div></div>';
+
+    // User info section
+    if (data.nome_cognome || data.iii_livello || data.business_unit) {
+      html += '<div class="detail-section"><h4>Informazioni Utente</h4>';
+      html += '<div class="ud-policy-card">';
+      if (data.nome_cognome) html += '<div class="ud-policy-row"><span class="ud-policy-label">Nome</span><span class="ud-policy-value">' + escHtml(data.nome_cognome) + '</span></div>';
+      if (data.iii_livello) html += '<div class="ud-policy-row"><span class="ud-policy-label">III Livello</span><span class="ud-policy-value">' + escHtml(data.iii_livello) + '</span></div>';
+      if (data.business_unit) html += '<div class="ud-policy-row"><span class="ud-policy-label">Business Unit</span><span class="ud-policy-value">' + escHtml(data.business_unit) + '</span></div>';
+      html += '</div></div>';
+    }
 
     // Policy section
+    var polType = data.policy_type || "default";
+    var polCls = polType === "user" ? "badge-user" : (polType === "group" ? "badge-group" : "badge-default");
+    var enfMode = data.enforcement_mode || "alert";
+    var enfCls = enfMode === "block" ? "badge-critical" : "badge-warning";
+
     html += '<div class="detail-section"><h4>Policy Applicata</h4>';
-    html += '<div class="detail-grid">';
-    html += detailItem("Tipo", data.policy_type || "default");
-    html += detailItem("Identificatore", data.policy_identifier || "default");
-    html += detailItem("Limite Mensile", data.monthly_cost_limit ? "$" + data.monthly_cost_limit.toFixed(2) : "N/A");
-    html += detailItem("Limite Giornaliero", data.daily_cost_limit ? "$" + data.daily_cost_limit.toFixed(2) : "N/A");
-    html += detailItem("Enforcement", data.enforcement_mode || "alert");
-    html += detailItem("Utilizzo", (data.percentage || 0).toFixed(1) + "%");
-    html += "</div></div>";
+    html += '<div class="ud-policy-card">';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Tipo</span><span class="badge ' + polCls + '">' + polType + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Identificatore</span><span class="ud-policy-value">' + escHtml(data.policy_identifier || "default") + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Limite Mensile</span><span class="ud-policy-value">' + (data.monthly_cost_limit ? "$" + data.monthly_cost_limit.toFixed(2) : "N/A") + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Limite Giornaliero</span><span class="ud-policy-value">' + (data.daily_cost_limit ? "$" + data.daily_cost_limit.toFixed(2) : "N/A") + '</span></div>';
+    html += '<div class="ud-policy-row"><span class="ud-policy-label">Enforcement</span><span class="badge ' + enfCls + '">' + enfMode + '</span></div>';
+    html += '</div></div>';
 
     // Groups section
     if (data.groups && data.groups.length > 0) {
       html += '<div class="detail-section"><h4>Gruppi</h4>';
-      html += "<p>" + data.groups.join(", ") + "</p></div>";
+      html += '<div class="ud-groups">';
+      data.groups.forEach(function(g) {
+        html += '<span class="ud-group-tag">' + escHtml(g) + '</span>';
+      });
+      html += '</div></div>';
     }
 
     // Actions
-    html += '<div class="detail-section" style="margin-top:24px;">';
+    html += '<div class="ud-actions">';
     html += '<button class="action-btn" onclick="openPolicyForUser(\'' + escAttr(email) + '\')">Imposta Quota Personalizzata</button>';
     html += "</div>";
 
@@ -277,6 +411,10 @@ function openUserDetail(email) {
   }).catch(function(e) {
     document.getElementById("modal-body").innerHTML = '<div class="error">Errore: ' + e.message + "</div>";
   });
+}
+
+function udMetricCard(label, value, color) {
+  return '<div class="ud-metric-card ud-metric-' + color + '"><div class="ud-metric-value">' + value + '</div><div class="ud-metric-label">' + label + '</div></div>';
 }
 
 function detailItem(label, value) {
@@ -287,7 +425,8 @@ function detailItem(label, value) {
 // Groups
 // ============================================================
 function loadGroups() {
-  apiCall("/api/groups").then(function(data) {
+  var params = "?" + getFilterParams("groups-");
+  apiCall("/api/groups" + params).then(function(data) {
     var tbody = document.getElementById("groups-tbody");
     if (!data.groups || data.groups.length === 0) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Nessun gruppo trovato</td></tr>';
@@ -460,6 +599,82 @@ function formatNumber(n) {
 }
 
 // ============================================================
+// Export Excel
+// ============================================================
+function exportUsersExcel() {
+  var params = "?export=true";
+  if (state.usersSearch) params += "&search=" + encodeURIComponent(state.usersSearch);
+  params += "&" + getFilterParams("");
+
+  apiCall("/api/users" + params).then(function(data) {
+    if (!data.users || data.users.length === 0) {
+      alert("Nessun dato da esportare");
+      return;
+    }
+    var period = (data.months || []).join(", ");
+    var headers = ["Email", "Nome Cognome", "III Livello", "Business Unit", "Policy", "Costo Periodo (USD)", "Limite (USD)", "Utilizzo %", "Token Totali"];
+    var rows = [headers];
+    data.users.forEach(function(u) {
+      rows.push([
+        u.email,
+        u.nome_cognome || "",
+        u.iii_livello || "",
+        u.business_unit || "",
+        u.policy_type || "default",
+        (u.total_cost || 0).toFixed(2),
+        (u.limit || 0).toFixed(2),
+        (u.percentage || 0).toFixed(1),
+        Math.round(u.total_tokens || 0),
+      ]);
+    });
+    downloadCsv(rows, "utenti_" + (data.months || []).join("_") + ".csv");
+  }).catch(function(e) {
+    alert("Errore export: " + e.message);
+  });
+}
+
+function exportGroupsExcel() {
+  var params = "?" + getFilterParams("groups-");
+  apiCall("/api/groups" + params).then(function(data) {
+    if (!data.groups || data.groups.length === 0) {
+      alert("Nessun dato da esportare");
+      return;
+    }
+    var headers = ["Gruppo", "Utenti", "Costo Totale (USD)", "Limite Mensile (USD)", "Enforcement"];
+    var rows = [headers];
+    data.groups.forEach(function(g) {
+      rows.push([
+        g.name,
+        g.user_count || 0,
+        (g.total_cost || 0).toFixed(2),
+        g.monthly_cost_limit ? g.monthly_cost_limit.toFixed(2) : "N/A",
+        g.enforcement_mode || "N/A",
+      ]);
+    });
+    downloadCsv(rows, "gruppi_" + (data.months || []).join("_") + ".csv");
+  }).catch(function(e) {
+    alert("Errore export: " + e.message);
+  });
+}
+
+function downloadCsv(rows, filename) {
+  var csv = rows.map(function(row) {
+    return row.map(function(cell) {
+      var s = String(cell).replace(/"/g, '""');
+      return '"' + s + '"';
+    }).join(";");
+  }).join("\r\n");
+  var bom = "﻿";
+  var blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
 // Init
 // ============================================================
 document.addEventListener("DOMContentLoaded", function() {
@@ -491,4 +706,23 @@ document.addEventListener("DOMContentLoaded", function() {
   document.getElementById("add-policy-btn").addEventListener("click", function() {
     openPolicyModal(null);
   });
+
+  // Filters - Users
+  document.getElementById("filter-mode").addEventListener("change", function() {
+    toggleFilterMode("");
+  });
+  document.getElementById("filter-apply-btn").addEventListener("click", function() {
+    state.usersPage = 1;
+    loadUsers();
+  });
+  document.getElementById("export-users-btn").addEventListener("click", exportUsersExcel);
+
+  // Filters - Groups
+  document.getElementById("groups-filter-mode").addEventListener("change", function() {
+    toggleFilterMode("groups-");
+  });
+  document.getElementById("groups-filter-apply-btn").addEventListener("click", function() {
+    loadGroups();
+  });
+  document.getElementById("export-groups-btn").addEventListener("click", exportGroupsExcel);
 });

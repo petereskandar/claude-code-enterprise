@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Claude Code User Dashboard - Individual developer cost/token usage view
+
+Parameters:
+  QuotaMetricsTableName:
+    Type: String
+    Default: UserQuotaMetrics
+    Description: DynamoDB table name for user quota metrics
+
+  PoliciesTableName:
+    Type: String
+    Default: QuotaPolicies
+    Description: DynamoDB table name for quota policies
+
+  DirectoryTableName:
+    Type: String
+    Default: UserDirectory
+    Description: DynamoDB table name for user directory
+
+Resources:
+  # ============================================================
+  # S3 Bucket for SPA
+  # ============================================================
+  UserDashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'claude-code-user-dashboard-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Name
+          Value: ClaudeCode-UserDashboard-SPA
+
+  # ============================================================
+  # Lambda (API Backend)
+  # ============================================================
+  UserDashboardRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: UserDashboardPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${QuotaMetricsTableName}'
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PoliciesTableName}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PoliciesTableName}/index/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DirectoryTableName}'
+
+  UserDashboardLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ClaudeCode-UserDashboard
+      RetentionInDays: 14
+
+  UserDashboardFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ClaudeCode-UserDashboard
+      Description: API backend for individual user dashboard - usage and model breakdown
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt UserDashboardRole.Arn
+      Environment:
+        Variables:
+          QUOTA_TABLE: !Ref QuotaMetricsTableName
+          POLICIES_TABLE: !Ref PoliciesTableName
+          DIRECTORY_TABLE: !Ref DirectoryTableName
+      Code:
+        S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+        S3Key: claude-code/user-dashboard/api.zip
+
+  # ============================================================
+  # API Gateway (HTTP API - open for now, JWT to be added)
+  # ============================================================
+  UserDashboardApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: ClaudeCode-UserDashboard-API
+      Description: User dashboard API (open access - JWT auth to be added)
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        MaxAge: 300
+
+  UserDashboardIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref UserDashboardApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt UserDashboardFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  UserDashboardUsageRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref UserDashboardApi
+      RouteKey: 'GET /api/my-usage'
+      Target: !Sub 'integrations/${UserDashboardIntegration}'
+
+  UserDashboardModelsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref UserDashboardApi
+      RouteKey: 'GET /api/my-models'
+      Target: !Sub 'integrations/${UserDashboardIntegration}'
+
+  UserDashboardMonthsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref UserDashboardApi
+      RouteKey: 'GET /api/my-available-months'
+      Target: !Sub 'integrations/${UserDashboardIntegration}'
+
+  UserDashboardStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref UserDashboardApi
+      StageName: $default
+      AutoDeploy: true
+
+  UserDashboardLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UserDashboardFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${UserDashboardApi}/*'
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint for user dashboard
+    Value: !Sub 'https://${UserDashboardApi}.execute-api.${AWS::Region}.amazonaws.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  UserDashboardBucketName:
+    Description: S3 bucket for user dashboard SPA
+    Value: !Ref UserDashboardBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+
+  UserDashboardFunctionArn:
+    Description: ARN of the user dashboard Lambda
+    Value: !GetAtt UserDashboardFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionArn'
