@@ -27,6 +27,11 @@ Parameters:
     Default: UserDirectory
     Description: DynamoDB table name for user directory
 
+  ArtifactsBucket:
+    Type: String
+    Default: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+    Description: S3 bucket where Lambda deployment zips are stored (uploaded by deploy-user-dashboard.sh)
+
 Resources:
   # ============================================================
   # S3 Bucket for SPA
@@ -196,7 +201,9 @@ Resources:
           POLICIES_TABLE: !Ref PoliciesTableName
           DIRECTORY_TABLE: !Ref DirectoryTableName
       Code:
-        S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+        # Source: deployment/infrastructure/lambda-functions/user_dashboard/index.py
+        # Deploy via: deployment/scripts/deploy-user-dashboard.sh
+        S3Bucket: !Ref ArtifactsBucket
         S3Key: claude-code/user-dashboard/api.zip
 
   # ============================================================

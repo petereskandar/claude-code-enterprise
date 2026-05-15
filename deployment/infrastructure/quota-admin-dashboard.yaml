@@ -17,6 +17,11 @@ Parameters:
     Default: /claude-code/quota/admin-emails
     Description: SSM Parameter path containing comma-separated admin emails
 
+  ArtifactsBucket:
+    Type: String
+    Default: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+    Description: S3 bucket where Lambda deployment zips are stored (uploaded by deploy-admin-dashboard.sh)
+
   QuotaMetricsTableName:
     Type: String
     Default: UserQuotaMetrics
@@ -335,7 +340,9 @@ Resources:
           DIRECTORY_TABLE: !Ref DirectoryTableName
           ADMIN_EMAILS_PARAM: !Ref AdminEmailsParam
       Code:
-        S3Bucket: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
+        # Source: deployment/infrastructure/lambda-functions/quota_admin/index.py
+        # Deploy via: deployment/scripts/deploy-admin-dashboard.sh
+        S3Bucket: !Ref ArtifactsBucket
         S3Key: claude-code/admin/dashboard/api.zip
 
 Outputs:
