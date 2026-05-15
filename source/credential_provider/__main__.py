@@ -1016,22 +1016,14 @@ class MultiProviderAuth:
                 query = parse_qs(urlparse(self.path).query)
 
                 if query.get("error"):
-                    # Only record the error if we haven't already got a valid code
-                    if not result_container["code"]:
-                        result_container["error"] = query.get("error_description", ["Unknown error"])[0]
+                    result_container["error"] = query.get("error_description", ["Unknown error"])[0]
                     self._send_response(400, "Authentication failed")
                 elif query.get("state", [""])[0] == expected_state and "code" in query:
                     result_container["code"] = query["code"][0]
-                    result_container["error"] = None  # clear any previous noise
                     self._send_response(200, "Authentication successful! You can close this window.")
-                elif "state" in query or "code" in query:
-                    # Stale callback from a previous auth session (wrong state).
-                    # Log it but do NOT fail — wait for the real callback to arrive.
-                    parent._debug_print(
-                        f"Ignored stale/mismatched callback (state={query.get('state', ['?'])[0][:8]}…)"
-                    )
-                    self._send_response(400, "Stale request — please wait")
-                # else: browser noise (favicon, probe, etc.) — ignore silently
+                else:
+                    result_container["error"] = "Invalid state or missing code"
+                    self._send_response(400, "Invalid response")
 
             def _send_response(self, code, message):
                 self.send_response(code)
