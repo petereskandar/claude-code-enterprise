@@ -195,6 +195,7 @@ def handle_users(params):
             "limit": limit_for_range,
             "percentage": pct,
             "policy_type": policy_type,
+            "groups": groups,
             "responsabile": dir_entry.get("responsabile", ""),
             "nome_cognome": dir_entry.get("nome_cognome", ""),
             "user_id": dir_entry.get("user_id", ""),

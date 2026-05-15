@@ -277,7 +277,7 @@ function loadUsers() {
       var policyCls = u.policy_type === "user" ? "badge-user" : (u.policy_type === "group" ? "badge-group" : "badge-default");
 
       html += "<tr>";
-      html += "<td>" + escHtml(u.email) + "</td>";
+      html += '<td><div class="user-type-wrap">' + userTypeIcon(u.groups) + escHtml(u.email) + "</div></td>";
       html += "<td>" + escHtml(u.responsabile || "") + "</td>";
       html += "<td>" + escHtml(u.III_livello || "") + "</td>";
       html += '<td><span class="badge ' + policyCls + '">' + (u.policy_type || "default") + "</span></td>";
@@ -599,6 +599,16 @@ function escAttr(s) {
 
 function formatNumber(n) {
   return Number(n).toLocaleString("it-IT");
+}
+
+function userTypeIcon(groups) {
+  var g = (groups || []).join(" ").toLowerCase();
+  var cls, letter, label;
+  if (g.indexOf("power") !== -1)         { cls = "power";    letter = "P"; label = "Power Users"; }
+  else if (g.indexOf("standard") !== -1) { cls = "standard"; letter = "S"; label = "Standard Users"; }
+  else if (g.indexOf("basic") !== -1)    { cls = "basic";    letter = "B"; label = "Basic Users"; }
+  else                                   { cls = "unknown";  letter = "?"; label = "Gruppo non definito"; }
+  return '<span class="user-type-icon ' + cls + '"><span class="utt">' + label + '</span>' + letter + '</span>';
 }
 
 // ============================================================
