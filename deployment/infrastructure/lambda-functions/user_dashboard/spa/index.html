@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Claude Code - I Miei Consumi</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <div class="topbar"></div>
@@ -15,108 +15,150 @@
     </div>
     <div class="banner-right">
       <span class="banner-email" id="banner-email"></span>
+      <button class="logout-icon-btn" id="logout-btn" style="display:none;" onclick="logout()" title="Logout">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
     </div>
   </div>
 
-  <div class="main">
-    <!-- Period Filter -->
-    <div class="filter-bar">
-      <div class="filter-group">
-        <label class="filter-label">Periodo:</label>
-        <select id="filter-mode" class="filter-select">
-          <option value="single">Mese singolo</option>
-          <option value="range">Range</option>
-        </select>
-        <select id="filter-month" class="filter-select"></select>
-        <select id="filter-from" class="filter-select" style="display:none;"></select>
-        <span id="filter-range-sep" style="display:none;"> &ndash; </span>
-        <select id="filter-to" class="filter-select" style="display:none;"></select>
-        <button class="apply-btn" id="filter-apply-btn">Applica</button>
-      </div>
+  <!-- Login Section -->
+  <div id="login-section" class="main">
+    <div class="page-title">
+      <h1>Claude Code — I Miei Consumi</h1>
+      <p>Visualizza i tuoi consumi e la tua quota mensile</p>
     </div>
-
-    <!-- Summary Cards -->
-    <div class="summary-cards" id="summary-cards">
-      <div class="summary-card blue">
-        <div class="summary-value" id="s-total-cost">-</div>
-        <div class="summary-label">Costo Periodo</div>
-      </div>
-      <div class="summary-card purple">
-        <div class="summary-value" id="s-total-tokens">-</div>
-        <div class="summary-label">Token Totali</div>
-      </div>
-      <div class="summary-card green">
-        <div class="summary-value" id="s-daily-cost">-</div>
-        <div class="summary-label">Costo Oggi</div>
-      </div>
-      <div class="summary-card orange">
-        <div class="summary-value" id="s-percentage">-</div>
-        <div class="summary-label">Quota Utilizzata</div>
-      </div>
+    <div class="divider"></div>
+    <div class="login-card">
+      <p>Accedi con il tuo account aziendale per visualizzare i tuoi dati</p>
+      <a class="login-btn" id="login-btn" href="#">Sign in with Entra ID</a>
     </div>
+  </div>
 
-    <!-- Quota Progress -->
-    <div class="card" id="quota-card">
-      <h3>Quota Mensile</h3>
-      <div class="quota-progress-wrap">
-        <div class="quota-progress" id="quota-bar">
-          <div class="quota-fill" id="quota-fill"></div>
-        </div>
-        <div class="quota-labels">
-          <span>$0</span>
-          <span id="quota-limit-label">Limite: -</span>
+  <!-- Dashboard Section -->
+  <div id="dashboard-section" style="display:none;">
+    <div class="main">
+      <!-- User Info Card -->
+      <div class="user-info-card" id="user-info-card" style="display:none;">
+        <div class="user-info-name" id="ui-nome"></div>
+        <div class="user-info-fields">
+          <div class="user-info-field" id="ui-responsabile-wrap">
+            <span class="ui-label">Responsabile</span>
+            <span class="ui-value" id="ui-responsabile"></span>
+          </div>
+          <div class="user-info-sep"></div>
+          <div class="user-info-field" id="ui-ii-wrap">
+            <span class="ui-label">II Livello</span>
+            <span class="ui-value" id="ui-ii"></span>
+          </div>
+          <div class="user-info-sep"></div>
+          <div class="user-info-field" id="ui-iii-wrap">
+            <span class="ui-label">III Livello</span>
+            <span class="ui-value" id="ui-iii"></span>
+          </div>
+          <div class="user-info-sep"></div>
+          <div class="user-info-field" id="ui-iv-wrap">
+            <span class="ui-label">IV Livello</span>
+            <span class="ui-value" id="ui-iv"></span>
+          </div>
         </div>
       </div>
-      <div class="quota-info" id="quota-info"></div>
-    </div>
 
-    <!-- Charts Row -->
-    <div class="charts-row">
-      <!-- Token Breakdown -->
-      <div class="card chart-card">
-        <h3>Distribuzione Token</h3>
-        <div class="chart-container" id="token-chart"></div>
+      <!-- Period Filter -->
+      <div class="filter-bar">
+        <div class="filter-group">
+          <label class="filter-label">Periodo:</label>
+          <select id="filter-mode" class="filter-select">
+            <option value="single">Mese singolo</option>
+            <option value="range">Range</option>
+          </select>
+          <select id="filter-month" class="filter-select"></select>
+          <select id="filter-from" class="filter-select" style="display:none;"></select>
+          <span id="filter-range-sep" style="display:none;"> &ndash; </span>
+          <select id="filter-to" class="filter-select" style="display:none;"></select>
+          <button class="apply-btn" id="filter-apply-btn">Applica</button>
+        </div>
       </div>
 
-      <!-- Model Cost Breakdown -->
-      <div class="card chart-card">
-        <h3>Costo per Modello</h3>
-        <div class="chart-container" id="model-chart"></div>
+      <!-- Summary Cards -->
+      <div class="summary-cards" id="summary-cards">
+        <div class="summary-card blue">
+          <div class="summary-value" id="s-total-cost">-</div>
+          <div class="summary-label">Costo Periodo</div>
+        </div>
+        <div class="summary-card purple">
+          <div class="summary-value" id="s-total-tokens">-</div>
+          <div class="summary-label">Token Totali</div>
+        </div>
+        <div class="summary-card green">
+          <div class="summary-value" id="s-daily-cost">-</div>
+          <div class="summary-label">Costo Oggi</div>
+        </div>
+        <div class="summary-card orange">
+          <div class="summary-value" id="s-percentage">-</div>
+          <div class="summary-label">Quota Utilizzata</div>
+        </div>
+      </div>
+
+      <!-- Quota Progress -->
+      <div class="card" id="quota-card">
+        <h3>Quota Mensile</h3>
+        <div class="quota-progress-wrap">
+          <div class="quota-progress" id="quota-bar">
+            <div class="quota-fill" id="quota-fill"></div>
+          </div>
+          <div class="quota-labels">
+            <span>$0</span>
+            <span id="quota-limit-label">Limite: -</span>
+          </div>
+        </div>
+        <div class="quota-info" id="quota-info"></div>
+      </div>
+
+      <!-- Charts Row -->
+      <div class="charts-row">
+        <div class="card chart-card">
+          <h3>Distribuzione Token</h3>
+          <div class="chart-container" id="token-chart"></div>
+        </div>
+        <div class="card chart-card">
+          <h3>Costo per Modello</h3>
+          <div class="chart-container" id="model-chart"></div>
+        </div>
+      </div>
+
+      <!-- Monthly Trend -->
+      <div class="card" id="trend-card" style="display:none;">
+        <h3>Trend Mensile</h3>
+        <div class="trend-container" id="trend-chart"></div>
+      </div>
+
+      <!-- Model Detail Table -->
+      <div class="card">
+        <h3>Dettaglio Modelli</h3>
+        <table id="models-table">
+          <thead>
+            <tr>
+              <th>Modello</th>
+              <th>Input</th>
+              <th>Output</th>
+              <th>Cache Read</th>
+              <th>Cache Write</th>
+              <th>Costo</th>
+              <th>%</th>
+            </tr>
+          </thead>
+          <tbody id="models-tbody">
+            <tr><td colspan="7" class="loading">Caricamento...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    <!-- Monthly Trend (visible in range mode) -->
-    <div class="card" id="trend-card" style="display:none;">
-      <h3>Trend Mensile</h3>
-      <div class="trend-container" id="trend-chart"></div>
-    </div>
-
-    <!-- Model Detail Table -->
-    <div class="card">
-      <h3>Dettaglio Modelli</h3>
-      <table id="models-table">
-        <thead>
-          <tr>
-            <th>Modello</th>
-            <th>Input</th>
-            <th>Output</th>
-            <th>Cache Read</th>
-            <th>Cache Write</th>
-            <th>Costo</th>
-            <th>%</th>
-          </tr>
-        </thead>
-        <tbody id="models-tbody">
-          <tr><td colspan="7" class="loading">Caricamento...</td></tr>
-        </tbody>
-      </table>
+    <div class="footer">
+      <p>Claude Code &mdash; Poste Italiane</p>
     </div>
   </div>
 
-  <div class="footer">
-    <p>Claude Code &mdash; Poste Italiane</p>
-  </div>
-
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

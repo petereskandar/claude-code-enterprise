@@ -88,6 +88,7 @@ def handle_overview(params):
     users = _get_all_users_usage_multi(months, current_date)
     policies = _load_all_policies()
     default_policy = policies.get("default:default")
+    directory = _load_user_directory()
 
     total_cost = 0
     over_quota = 0
@@ -107,7 +108,13 @@ def handle_overview(params):
         enforcement = (policy or {}).get("enforcement_mode", "alert")
         if pct > 100 and enforcement == "block":
             blocked += 1
-        user_costs.append({"email": email, "total_cost": cost, "percentage": pct})
+        dir_entry = directory.get(email, {})
+        user_costs.append({
+            "email": email,
+            "total_cost": cost,
+            "percentage": pct,
+            "III_livello": dir_entry.get("III_livello", ""),
+        })
 
     user_costs.sort(key=lambda x: x["total_cost"], reverse=True)
 
@@ -170,7 +177,7 @@ def handle_users(params):
 
     user_list = []
     for email, usage in all_users.items():
-        if search and search not in email.lower():
+        if search and search not in email.lower() and search not in directory.get(email, {}).get("responsabile", "").lower():
             continue
         groups = usage.get("groups", [])
         policy = _resolve_policy(email, groups, policies, default_policy)
@@ -188,9 +195,12 @@ def handle_users(params):
             "limit": limit_for_range,
             "percentage": pct,
             "policy_type": policy_type,
-            "iii_livello": dir_entry.get("iii_livello", ""),
-            "business_unit": dir_entry.get("business_unit", ""),
+            "responsabile": dir_entry.get("responsabile", ""),
             "nome_cognome": dir_entry.get("nome_cognome", ""),
+            "user_id": dir_entry.get("user_id", ""),
+            "II_livello": dir_entry.get("II_livello", ""),
+            "III_livello": dir_entry.get("III_livello", ""),
+            "IV_livello": dir_entry.get("IV_livello", ""),
         })
 
     user_list.sort(key=lambda x: x["total_cost"], reverse=True)
@@ -284,9 +294,11 @@ def handle_user_detail(email, params=None):
         "cache_read_tokens": cache_read_tokens,
         "cache_write_tokens": cache_write_tokens,
         "groups": groups,
-        "iii_livello": dir_entry.get("iii_livello", ""),
-        "business_unit": dir_entry.get("business_unit", ""),
+        "responsabile": dir_entry.get("responsabile", ""),
         "nome_cognome": dir_entry.get("nome_cognome", ""),
+        "II_livello": dir_entry.get("II_livello", ""),
+        "III_livello": dir_entry.get("III_livello", ""),
+        "IV_livello": dir_entry.get("IV_livello", ""),
         "policy_type": (policy or {}).get("policy_type", "default"),
         "policy_identifier": (policy or {}).get("identifier", "default"),
         "monthly_cost_limit": limit_for_range,
@@ -536,28 +548,34 @@ def _load_user_directory():
     directory = {}
     try:
         response = directory_table.scan(
-            ProjectionExpression="email, iii_livello, business_unit, nome_cognome",
+            ProjectionExpression="email, responsabile, nome_cognome, user_id, II_livello, III_livello, IV_livello",
         )
         for item in response.get("Items", []):
             email = item.get("email", "").lower()
             if email:
                 directory[email] = {
-                    "iii_livello": item.get("iii_livello", ""),
-                    "business_unit": item.get("business_unit", ""),
+                    "responsabile": item.get("responsabile", ""),
                     "nome_cognome": item.get("nome_cognome", ""),
+                    "user_id": item.get("user_id", ""),
+                    "II_livello": item.get("II_livello", ""),
+                    "III_livello": item.get("III_livello", ""),
+                    "IV_livello": item.get("IV_livello", ""),
                 }
         while "LastEvaluatedKey" in response:
             response = directory_table.scan(
-                ProjectionExpression="email, iii_livello, business_unit, nome_cognome",
+                ProjectionExpression="email, responsabile, nome_cognome, user_id, II_livello, III_livello, IV_livello",
                 ExclusiveStartKey=response["LastEvaluatedKey"],
             )
             for item in response.get("Items", []):
                 email = item.get("email", "").lower()
                 if email:
                     directory[email] = {
-                        "iii_livello": item.get("iii_livello", ""),
-                        "business_unit": item.get("business_unit", ""),
+                        "responsabile": item.get("responsabile", ""),
                         "nome_cognome": item.get("nome_cognome", ""),
+                        "user_id": item.get("user_id", ""),
+                        "II_livello": item.get("II_livello", ""),
+                        "III_livello": item.get("III_livello", ""),
+                        "IV_livello": item.get("IV_livello", ""),
                     }
     except Exception as e:
         print(f"Error loading user directory: {e}")
@@ -569,9 +587,12 @@ def _get_user_directory_entry(email):
         response = directory_table.get_item(Key={"email": email.lower()})
         item = response.get("Item", {})
         return {
-            "iii_livello": item.get("iii_livello", ""),
-            "business_unit": item.get("business_unit", ""),
+            "responsabile": item.get("responsabile", ""),
             "nome_cognome": item.get("nome_cognome", ""),
+            "user_id": item.get("user_id", ""),
+            "II_livello": item.get("II_livello", ""),
+            "III_livello": item.get("III_livello", ""),
+            "IV_livello": item.get("IV_livello", ""),
         }
     except Exception:
         return {}

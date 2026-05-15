@@ -2,6 +2,16 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Claude Code User Dashboard - Individual developer cost/token usage view
 
 Parameters:
+  AzureTenantId:
+    Type: String
+    Default: 761de76f-3d5c-4174-917c-5ad4d06360cb
+    Description: Azure AD / Entra ID tenant ID
+
+  AzureClientId:
+    Type: String
+    Default: 97c4d1b5-7c46-4bff-b6cf-d93898635821
+    Description: Azure AD / Entra ID application (client) ID for JWT auth
+
   QuotaMetricsTableName:
     Type: String
     Default: UserQuotaMetrics
@@ -37,6 +47,93 @@ Resources:
       Tags:
         - Key: Name
           Value: ClaudeCode-UserDashboard-SPA
+
+  UserDashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UserDashboardBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${UserDashboardBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${UserDashboardCloudFrontDistribution}'
+
+  # ============================================================
+  # CloudFront Distribution
+  # ============================================================
+  UserDashboardOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-OAC'
+        Description: OAC for user dashboard S3 bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  UserDashboardCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Claude Code User Dashboard
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt UserDashboardBucket.RegionalDomainName
+            OriginAccessControlId: !Ref UserDashboardOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: ApiOrigin
+            DomainName: !Sub '${UserDashboardApi}.execute-api.${AWS::Region}.amazonaws.com'
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+        CacheBehaviors:
+          - PathPattern: '/api/*'
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+      Tags:
+        - Key: Name
+          Value: ClaudeCode-UserDashboard
 
   # ============================================================
   # Lambda (API Backend)
@@ -103,24 +200,27 @@ Resources:
         S3Key: claude-code/user-dashboard/api.zip
 
   # ============================================================
-  # API Gateway (HTTP API - open for now, JWT to be added)
+  # API Gateway (HTTP API - JWT authenticated)
   # ============================================================
   UserDashboardApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
       Name: ClaudeCode-UserDashboard-API
-      Description: User dashboard API (open access - JWT auth to be added)
+      Description: User dashboard API - JWT authenticated via Entra ID
       ProtocolType: HTTP
-      CorsConfiguration:
-        AllowOrigins:
-          - '*'
-        AllowMethods:
-          - GET
-          - OPTIONS
-        AllowHeaders:
-          - Content-Type
-          - Authorization
-        MaxAge: 300
+
+  UserDashboardAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref UserDashboardApi
+      AuthorizerType: JWT
+      Name: EntraIdAuthorizer
+      IdentitySource:
+        - '$request.header.Authorization'
+      JwtConfiguration:
+        Audience:
+          - !Ref AzureClientId
+        Issuer: !Sub 'https://login.microsoftonline.com/${AzureTenantId}/v2.0'
 
   UserDashboardIntegration:
     Type: AWS::ApiGatewayV2::Integration
@@ -135,6 +235,8 @@ Resources:
     Properties:
       ApiId: !Ref UserDashboardApi
       RouteKey: 'GET /api/my-usage'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref UserDashboardAuthorizer
       Target: !Sub 'integrations/${UserDashboardIntegration}'
 
   UserDashboardModelsRoute:
@@ -142,6 +244,8 @@ Resources:
     Properties:
       ApiId: !Ref UserDashboardApi
       RouteKey: 'GET /api/my-models'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref UserDashboardAuthorizer
       Target: !Sub 'integrations/${UserDashboardIntegration}'
 
   UserDashboardMonthsRoute:
@@ -149,6 +253,8 @@ Resources:
     Properties:
       ApiId: !Ref UserDashboardApi
       RouteKey: 'GET /api/my-available-months'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref UserDashboardAuthorizer
       Target: !Sub 'integrations/${UserDashboardIntegration}'
 
   UserDashboardStage:
@@ -167,6 +273,12 @@ Resources:
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${UserDashboardApi}/*'
 
 Outputs:
+  DashboardUrl:
+    Description: CloudFront URL for the user dashboard
+    Value: !Sub 'https://${UserDashboardCloudFrontDistribution.DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardUrl'
+
   ApiEndpoint:
     Description: API Gateway endpoint for user dashboard
     Value: !Sub 'https://${UserDashboardApi}.execute-api.${AWS::Region}.amazonaws.com'
@@ -178,6 +290,12 @@ Outputs:
     Value: !Ref UserDashboardBucket
     Export:
       Name: !Sub '${AWS::StackName}-BucketName'
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (for invalidation on deploy)
+    Value: !Ref UserDashboardCloudFrontDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-DistributionId'
 
   UserDashboardFunctionArn:
     Description: ARN of the user dashboard Lambda

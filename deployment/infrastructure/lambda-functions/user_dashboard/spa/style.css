@@ -31,7 +31,119 @@ body {
 .banner-right { display: flex; align-items: center; gap: 12px; }
 .banner-email { color: rgba(255,255,255,0.9); font-size: 0.9em; }
 
+.logout-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 50%;
+  color: white;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.logout-icon-btn:hover {
+  background: rgba(186,27,27,0.9);
+  border-color: rgba(186,27,27,0.9);
+}
+
+/* Login */
+.page-title { margin-bottom: 8px; }
+.page-title h1 { font-size: 1.6em; font-weight: 700; color: #0047bb; }
+.page-title p { color: #5d5e61; font-size: 0.95em; margin-top: 4px; }
+
+.divider {
+  height: 3px;
+  background: linear-gradient(90deg, #0047bb 0%, #eedc00 100%);
+  margin: 20px 0 30px 0;
+  border-radius: 2px;
+}
+
+.login-card {
+  background: #fff;
+  border: 1px solid #c6c6c9;
+  border-radius: 8px;
+  padding: 60px 30px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  text-align: center;
+}
+
+.login-card p {
+  color: #5d5e61;
+  margin-bottom: 28px;
+  font-size: 1em;
+}
+
+.login-btn {
+  display: inline-block;
+  padding: 13px 36px;
+  background: #0047bb;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 1em;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+.login-btn:hover { background: #00297a; }
+
 .main { max-width: 1100px; margin: 0 auto; padding: 24px 20px; }
+
+/* User Info Card */
+.user-info-card {
+  background: white;
+  border-radius: 10px;
+  padding: 16px 24px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  margin-bottom: 16px;
+  border-left: 4px solid #0047bb;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.user-info-name {
+  font-size: 1em;
+  font-weight: 700;
+  color: #0047bb;
+  white-space: nowrap;
+  min-width: 140px;
+}
+.user-info-fields {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-wrap: wrap;
+  flex: 1;
+}
+.user-info-field {
+  display: flex;
+  flex-direction: column;
+  padding: 0 20px;
+  gap: 2px;
+}
+.user-info-sep {
+  width: 1px;
+  height: 36px;
+  background: #e5e7eb;
+  flex-shrink: 0;
+}
+.ui-label {
+  font-size: 0.7em;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ui-value {
+  font-size: 0.88em;
+  color: #1f2937;
+  font-weight: 500;
+}
 
 /* Filter */
 .filter-bar {

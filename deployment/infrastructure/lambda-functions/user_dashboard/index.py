@@ -21,8 +21,12 @@ def handler(event, context):
     method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
     params = event.get("queryStringParameters") or {}
 
-    # TODO: extract email from JWT once login is enabled
-    email = params.get("email", "peter.eskandar@posteitaliane.it").lower()
+    # Extract email from JWT claims (set by API Gateway JWT authorizer)
+    jwt_claims = event.get("requestContext", {}).get("authorizer", {}).get("jwt", {}).get("claims", {})
+    email = (jwt_claims.get("email") or jwt_claims.get("preferred_username") or "").lower()
+
+    if not email:
+        return _response(401, {"error": "Unauthorized: missing email claim in token"})
 
     try:
         if path == "/api/my-usage" and method == "GET":
@@ -105,8 +109,10 @@ def handle_my_usage(email, params):
     return _response(200, {
         "email": email,
         "nome_cognome": dir_entry.get("nome_cognome", ""),
-        "iii_livello": dir_entry.get("iii_livello", ""),
-        "business_unit": dir_entry.get("business_unit", ""),
+        "responsabile": dir_entry.get("responsabile", ""),
+        "II_livello": dir_entry.get("II_livello", ""),
+        "III_livello": dir_entry.get("III_livello", ""),
+        "IV_livello": dir_entry.get("IV_livello", ""),
         "total_cost": total_cost,
         "daily_cost": daily_cost,
         "total_tokens": total_tokens,
@@ -270,9 +276,11 @@ def _get_user_directory_entry(email):
         response = directory_table.get_item(Key={"email": email.lower()})
         item = response.get("Item", {})
         return {
-            "iii_livello": item.get("iii_livello", ""),
-            "business_unit": item.get("business_unit", ""),
+            "responsabile": item.get("responsabile", ""),
             "nome_cognome": item.get("nome_cognome", ""),
+            "II_livello": item.get("II_livello", ""),
+            "III_livello": item.get("III_livello", ""),
+            "IV_livello": item.get("IV_livello", ""),
         }
     except Exception:
         return {}
