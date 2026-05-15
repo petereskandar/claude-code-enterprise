@@ -90,7 +90,7 @@
           </div>
           <div class="search-row">
             <div class="search-box">
-              <input type="text" id="user-search" placeholder="Cerca utente per email..." autocomplete="off">
+              <input type="text" id="user-search" placeholder="Cerca per email o responsabile..." autocomplete="off">
               <button class="search-btn" id="user-search-btn">Cerca</button>
             </div>
             <div class="pagination" id="users-pagination"></div>
@@ -101,8 +101,8 @@
             <thead>
               <tr>
                 <th>Email</th>
+                <th>Responsabile</th>
                 <th>III Livello</th>
-                <th>Business Unit</th>
                 <th>Policy</th>
                 <th>Costo Mese</th>
                 <th>Limite</th>
@@ -259,6 +259,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

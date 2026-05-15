@@ -230,12 +230,13 @@ function loadOverview() {
 
     var html = "<h3>Top Consumers</h3>";
     if (data.top_consumers && data.top_consumers.length > 0) {
-      html += '<table><thead><tr><th>Email</th><th>Costo Mese</th><th>Utilizzo</th></tr></thead><tbody>';
+      html += '<table><thead><tr><th>Email</th><th>III Livello</th><th>Costo Mese</th><th>Utilizzo</th></tr></thead><tbody>';
       data.top_consumers.forEach(function(u) {
         var pct = u.percentage || 0;
         var cls = pct > 100 ? "critical" : (pct > 80 ? "warning" : "ok");
         html += "<tr>";
         html += "<td>" + escHtml(u.email) + "</td>";
+        html += "<td>" + escHtml(u.III_livello || "") + "</td>";
         html += "<td>$" + (u.total_cost || 0).toFixed(2) + "</td>";
         html += '<td><div class="progress-bar"><div class="progress-fill ' + cls + '" style="width:' + Math.min(pct, 100) + '%"></div></div> ' + pct.toFixed(0) + "%</td>";
         html += "</tr>";
@@ -277,8 +278,8 @@ function loadUsers() {
 
       html += "<tr>";
       html += "<td>" + escHtml(u.email) + "</td>";
-      html += "<td>" + escHtml(u.iii_livello || "") + "</td>";
-      html += "<td>" + escHtml(u.business_unit || "") + "</td>";
+      html += "<td>" + escHtml(u.responsabile || "") + "</td>";
+      html += "<td>" + escHtml(u.III_livello || "") + "</td>";
       html += '<td><span class="badge ' + policyCls + '">' + (u.policy_type || "default") + "</span></td>";
       html += "<td>$" + (u.total_cost || 0).toFixed(2) + "</td>";
       html += "<td>$" + (u.limit || 0).toFixed(2) + "</td>";
@@ -368,12 +369,14 @@ function openUserDetail(email) {
     html += '</div></div>';
 
     // User info section
-    if (data.nome_cognome || data.iii_livello || data.business_unit) {
+    if (data.nome_cognome || data.responsabile || data.III_livello) {
       html += '<div class="detail-section"><h4>Informazioni Utente</h4>';
       html += '<div class="ud-policy-card">';
       if (data.nome_cognome) html += '<div class="ud-policy-row"><span class="ud-policy-label">Nome</span><span class="ud-policy-value">' + escHtml(data.nome_cognome) + '</span></div>';
-      if (data.iii_livello) html += '<div class="ud-policy-row"><span class="ud-policy-label">III Livello</span><span class="ud-policy-value">' + escHtml(data.iii_livello) + '</span></div>';
-      if (data.business_unit) html += '<div class="ud-policy-row"><span class="ud-policy-label">Business Unit</span><span class="ud-policy-value">' + escHtml(data.business_unit) + '</span></div>';
+      if (data.responsabile) html += '<div class="ud-policy-row"><span class="ud-policy-label">Responsabile</span><span class="ud-policy-value">' + escHtml(data.responsabile) + '</span></div>';
+      if (data.II_livello)  html += '<div class="ud-policy-row"><span class="ud-policy-label">II Livello</span><span class="ud-policy-value">'  + escHtml(data.II_livello)  + '</span></div>';
+      if (data.III_livello) html += '<div class="ud-policy-row"><span class="ud-policy-label">III Livello</span><span class="ud-policy-value">' + escHtml(data.III_livello) + '</span></div>';
+      if (data.IV_livello)  html += '<div class="ud-policy-row"><span class="ud-policy-label">IV Livello</span><span class="ud-policy-value">'  + escHtml(data.IV_livello)  + '</span></div>';
       html += '</div></div>';
     }
 
@@ -599,79 +602,111 @@ function formatNumber(n) {
 }
 
 // ============================================================
-// Export Excel
+// Export Excel (ExcelJS)
 // ============================================================
+function buildWorkbook(sheetName, headers, colWidths, dataRows) {
+  var wb = new ExcelJS.Workbook();
+  wb.creator = "Claude Code Admin";
+  var ws = wb.addWorksheet(sheetName, { views: [{ state: "frozen", ySplit: 1 }] });
+
+  ws.columns = headers.map(function(h, i) {
+    return { header: h, width: colWidths[i] || 16 };
+  });
+
+  // Header row style — blu Poste Italiane
+  var headerRow = ws.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell(function(cell) {
+    cell.font      = { bold: true, color: { argb: "FFFFFFFF" }, size: 10, name: "Calibri" };
+    cell.fill      = { type: "pattern", pattern: "solid", fgColor: { argb: "FF003087" } };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+    cell.border    = {
+      top:    { style: "thin", color: { argb: "FF000000" } },
+      bottom: { style: "thin", color: { argb: "FF000000" } },
+      left:   { style: "thin", color: { argb: "FF000000" } },
+      right:  { style: "thin", color: { argb: "FF000000" } },
+    };
+  });
+
+  // Data rows
+  dataRows.forEach(function(rowData, idx) {
+    var row = ws.addRow(rowData);
+    row.height = 18;
+    var bgColor = (idx % 2 === 0) ? "FFEAF0FA" : "FFFFFFFF";
+    row.eachCell({ includeEmpty: true }, function(cell) {
+      cell.font      = { size: 10, name: "Calibri" };
+      cell.fill      = { type: "pattern", pattern: "solid", fgColor: { argb: bgColor } };
+      cell.alignment = { vertical: "middle" };
+      cell.border    = {
+        top:    { style: "thin", color: { argb: "FF000000" } },
+        bottom: { style: "thin", color: { argb: "FF000000" } },
+        left:   { style: "thin", color: { argb: "FF000000" } },
+        right:  { style: "thin", color: { argb: "FF000000" } },
+      };
+    });
+  });
+
+  return wb;
+}
+
+function saveWorkbook(wb, filename) {
+  wb.xlsx.writeBuffer().then(function(buffer) {
+    var blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  });
+}
+
 function exportUsersExcel() {
   var params = "?export=true";
   if (state.usersSearch) params += "&search=" + encodeURIComponent(state.usersSearch);
   params += "&" + getFilterParams("");
 
   apiCall("/api/users" + params).then(function(data) {
-    if (!data.users || data.users.length === 0) {
-      alert("Nessun dato da esportare");
-      return;
-    }
-    var period = (data.months || []).join(", ");
-    var headers = ["Email", "Nome Cognome", "III Livello", "Business Unit", "Policy", "Costo Periodo (USD)", "Limite (USD)", "Utilizzo %", "Token Totali"];
-    var rows = [headers];
-    data.users.forEach(function(u) {
-      rows.push([
+    if (!data.users || data.users.length === 0) { alert("Nessun dato da esportare"); return; }
+    var headers   = ["UserID", "Email", "Nome Cognome", "Responsabile", "II Livello", "III Livello", "IV Livello", "Policy", "Costo (USD)", "Limite (USD)", "Utilizzo %", "Token Totali"];
+    var colWidths = [12, 38, 24, 18, 22, 22, 44, 10, 13, 13, 11, 14];
+    var rows = data.users.map(function(u) {
+      return [
+        u.user_id || "",
         u.email,
         u.nome_cognome || "",
-        u.iii_livello || "",
-        u.business_unit || "",
+        u.responsabile || "",
+        u.II_livello || "",
+        u.III_livello || "",
+        u.IV_livello || "",
         u.policy_type || "default",
-        (u.total_cost || 0).toFixed(2),
-        (u.limit || 0).toFixed(2),
-        (u.percentage || 0).toFixed(1),
+        parseFloat((u.total_cost || 0).toFixed(2)),
+        parseFloat((u.limit || 0).toFixed(2)),
+        parseFloat((u.percentage || 0).toFixed(1)),
         Math.round(u.total_tokens || 0),
-      ]);
+      ];
     });
-    downloadCsv(rows, "utenti_" + (data.months || []).join("_") + ".csv");
-  }).catch(function(e) {
-    alert("Errore export: " + e.message);
-  });
+    var wb = buildWorkbook("Utenti", headers, colWidths, rows);
+    saveWorkbook(wb, "utenti_" + (data.months || []).join("_") + ".xlsx");
+  }).catch(function(e) { alert("Errore export: " + e.message); });
 }
 
 function exportGroupsExcel() {
   var params = "?" + getFilterParams("groups-");
   apiCall("/api/groups" + params).then(function(data) {
-    if (!data.groups || data.groups.length === 0) {
-      alert("Nessun dato da esportare");
-      return;
-    }
-    var headers = ["Gruppo", "Utenti", "Costo Totale (USD)", "Limite Mensile (USD)", "Enforcement"];
-    var rows = [headers];
-    data.groups.forEach(function(g) {
-      rows.push([
+    if (!data.groups || data.groups.length === 0) { alert("Nessun dato da esportare"); return; }
+    var headers   = ["Gruppo", "Utenti", "Costo Totale (USD)", "Limite Mensile (USD)", "Enforcement"];
+    var colWidths = [32, 9, 20, 22, 15];
+    var rows = data.groups.map(function(g) {
+      return [
         g.name,
         g.user_count || 0,
-        (g.total_cost || 0).toFixed(2),
-        g.monthly_cost_limit ? g.monthly_cost_limit.toFixed(2) : "N/A",
-        g.enforcement_mode || "N/A",
-      ]);
+        parseFloat((g.total_cost || 0).toFixed(2)),
+        g.monthly_cost_limit ? parseFloat(g.monthly_cost_limit.toFixed(2)) : "",
+        g.enforcement_mode || "",
+      ];
     });
-    downloadCsv(rows, "gruppi_" + (data.months || []).join("_") + ".csv");
-  }).catch(function(e) {
-    alert("Errore export: " + e.message);
-  });
-}
-
-function downloadCsv(rows, filename) {
-  var csv = rows.map(function(row) {
-    return row.map(function(cell) {
-      var s = String(cell).replace(/"/g, '""');
-      return '"' + s + '"';
-    }).join(";");
-  }).join("\r\n");
-  var bom = "﻿";
-  var blob = new Blob([bom + csv], { type: "text/csv;charset=utf-8;" });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+    var wb = buildWorkbook("Gruppi", headers, colWidths, rows);
+    saveWorkbook(wb, "gruppi_" + (data.months || []).join("_") + ".xlsx");
+  }).catch(function(e) { alert("Errore export: " + e.message); });
 }
 
 // ============================================================

@@ -64,6 +64,20 @@ output.json
 *.bak
 /test_*.py
 
+# Root-level scratch/debug files generated during development
+/admin-*.json
+/bedrock-*.json
+/cf-config.json
+/cost-*.json
+/ct-events.json
+/deployed-*.js
+/deployed-*.html
+/tagged-resources.json
+/user-groups.json
+/widget-*.json
+/layer-extracted/
+/deployment/infrastructure/lambda-functions/bedrock_metrics_bridge/widget-out.json
+
 CLAUDE.md
 
 guidance-docs/
