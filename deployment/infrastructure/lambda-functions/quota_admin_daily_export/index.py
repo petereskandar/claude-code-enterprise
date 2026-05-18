@@ -20,7 +20,7 @@ policies_table  = dynamodb.Table(POLICIES_TABLE)
 directory_table = dynamodb.Table(DIRECTORY_TABLE)
 
 CSV_HEADERS = [
-    "UserID", "Email", "Nome Cognome", "Responsabile",
+    "UserID", "Email", "Nome Cognome",
     "II Livello", "III Livello", "IV Livello",
     "Profilo Utente",
     "Costo (USD)", "Limite (USD)", "Utilizzo %", "Token Totali",
@@ -52,14 +52,13 @@ def handler(event, context):
             dir_entry.get("user_id", ""),
             email,
             dir_entry.get("nome_cognome", ""),
-            dir_entry.get("responsabile", ""),
             dir_entry.get("II_livello", ""),
             dir_entry.get("III_livello", ""),
             dir_entry.get("IV_livello", ""),
             _user_profile_label(groups),
-            round(cost, 4),
-            round(limit, 4),
-            round(pct, 2),
+            f"{cost:.2f}",
+            f"{limit:.2f}",
+            f"{pct:.1f}",
             int(usage.get("total_tokens", 0)),
         ])
 
