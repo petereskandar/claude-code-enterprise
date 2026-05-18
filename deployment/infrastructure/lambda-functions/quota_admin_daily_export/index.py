@@ -62,7 +62,7 @@ def handler(event, context):
             int(usage.get("total_tokens", 0)),
         ])
 
-    rows.sort(key=lambda r: r[8], reverse=True)
+    rows.sort(key=lambda r: float(r[8]), reverse=True)
 
     buf = io.StringIO()
     writer = csv.writer(buf)
