@@ -22,6 +22,11 @@ Parameters:
     Default: claude-code-s3-cfnartifactsbucket-0enb7bvsxlut
     Description: S3 bucket where Lambda deployment zips are stored (uploaded by deploy-admin-dashboard.sh)
 
+  DailyExportRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Days to retain daily CSV exports in S3 before automatic deletion
+
   QuotaMetricsTableName:
     Type: String
     Default: UserQuotaMetrics
@@ -266,6 +271,31 @@ Resources:
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AdminApi}/*'
 
   # ============================================================
+  # S3 Bucket for daily CSV exports
+  # ============================================================
+  DailyExportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'claude-code-daily-exports-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldExports
+            Status: Enabled
+            ExpirationInDays: !Ref DailyExportRetentionDays
+      Tags:
+        - Key: Name
+          Value: ClaudeCode-DailyExports
+
+  # ============================================================
   # Lambda (Backend API only)
   # ============================================================
   AdminApiRole:
@@ -345,6 +375,89 @@ Resources:
         S3Bucket: !Ref ArtifactsBucket
         S3Key: claude-code/admin/dashboard/api.zip
 
+  # ============================================================
+  # Lambda - Daily CSV Export (triggered by EventBridge at midnight CET)
+  # ============================================================
+  DailyExportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DailyExportPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${QuotaMetricsTableName}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PoliciesTableName}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DirectoryTableName}'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub '${DailyExportBucket.Arn}/daily/*'
+
+  DailyExportLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ClaudeCode-DailyExport
+      RetentionInDays: 14
+
+  DailyExportFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ClaudeCode-DailyExport
+      Description: Exports daily usage CSV to S3 - triggered at midnight CET by EventBridge
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 120
+      MemorySize: 256
+      Role: !GetAtt DailyExportRole.Arn
+      Environment:
+        Variables:
+          QUOTA_TABLE: !Ref QuotaMetricsTableName
+          POLICIES_TABLE: !Ref PoliciesTableName
+          DIRECTORY_TABLE: !Ref DirectoryTableName
+          EXPORT_BUCKET: !Ref DailyExportBucket
+      Code:
+        # Source: deployment/infrastructure/lambda-functions/quota_admin_daily_export/index.py
+        # Deploy via: deployment/scripts/deploy-admin-dashboard.sh
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: claude-code/admin/daily-export/api.zip
+
+  # EventBridge rule: every day at 23:00 UTC = midnight CET (01:00 CEST in summer)
+  # Use cron(0 23 * * ? *) for midnight CET (winter); adjust to cron(0 22 * * ? *) during CEST
+  DailyExportSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ClaudeCode-DailyExport-Schedule
+      Description: Triggers daily CSV export at midnight CET
+      ScheduleExpression: 'cron(0 23 * * ? *)'
+      State: ENABLED
+      Targets:
+        - Id: DailyExportLambda
+          Arn: !GetAtt DailyExportFunction.Arn
+
+  DailyExportLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DailyExportFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyExportSchedule.Arn
+
 Outputs:
   DashboardUrl:
     Description: CloudFront URL for the admin dashboard
@@ -375,3 +488,9 @@ Outputs:
     Value: !GetAtt AdminApiFunction.Arn
     Export:
       Name: !Sub '${AWS::StackName}-FunctionArn'
+
+  DailyExportBucketName:
+    Description: S3 bucket where daily CSV exports are stored
+    Value: !Ref DailyExportBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DailyExportBucket'

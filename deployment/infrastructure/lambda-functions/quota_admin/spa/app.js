@@ -611,6 +611,14 @@ function userTypeIcon(groups) {
   return '<span class="user-type-icon ' + cls + '"><span class="utt">' + label + '</span>' + letter + '</span>';
 }
 
+function userProfileLabel(groups) {
+  var g = (groups || []).join(" ").toLowerCase();
+  if (g.indexOf("power") !== -1)         return "Power Users";
+  else if (g.indexOf("standard") !== -1) return "Standard Users";
+  else if (g.indexOf("basic") !== -1)    return "Basic Users";
+  return "";
+}
+
 // ============================================================
 // Export Excel (ExcelJS)
 // ============================================================
@@ -676,8 +684,8 @@ function exportUsersExcel() {
 
   apiCall("/api/users" + params).then(function(data) {
     if (!data.users || data.users.length === 0) { alert("Nessun dato da esportare"); return; }
-    var headers   = ["UserID", "Email", "Nome Cognome", "Responsabile", "II Livello", "III Livello", "IV Livello", "Policy", "Costo (USD)", "Limite (USD)", "Utilizzo %", "Token Totali"];
-    var colWidths = [12, 38, 24, 18, 22, 22, 44, 10, 13, 13, 11, 14];
+    var headers   = ["UserID", "Email", "Nome Cognome", "Responsabile", "II Livello", "III Livello", "IV Livello", "Profilo Utente", "Policy", "Costo (USD)", "Limite (USD)", "Utilizzo %", "Token Totali"];
+    var colWidths = [12, 38, 24, 18, 22, 22, 44, 16, 10, 13, 13, 11, 14];
     var rows = data.users.map(function(u) {
       return [
         u.user_id || "",
@@ -687,6 +695,7 @@ function exportUsersExcel() {
         u.II_livello || "",
         u.III_livello || "",
         u.IV_livello || "",
+        userProfileLabel(u.groups),
         u.policy_type || "default",
         parseFloat((u.total_cost || 0).toFixed(2)),
         parseFloat((u.limit || 0).toFixed(2)),

@@ -28,6 +28,8 @@ done
 
 TEMPLATE="$REPO_ROOT/deployment/infrastructure/quota-admin-dashboard.yaml"
 LAMBDA_SRC="$REPO_ROOT/deployment/infrastructure/lambda-functions/quota_admin/index.py"
+LAMBDA_EXPORT_SRC="$REPO_ROOT/deployment/infrastructure/lambda-functions/quota_admin_daily_export/index.py"
+LAMBDA_EXPORT_S3_KEY="claude-code/admin/daily-export/api.zip"
 SPA_DIR="$REPO_ROOT/deployment/infrastructure/lambda-functions/quota_admin/spa"
 
 echo "╭─────────────────────────────────────────────────╮"
@@ -40,7 +42,7 @@ echo ""
 # ============================================================
 # Step 1: Deploy CloudFormation stack
 # ============================================================
-echo "→ [1/4] Deploy CloudFormation stack..."
+echo "→ [1/5] Deploy CloudFormation stack..."
 
 aws cloudformation deploy \
   --stack-name "$STACK_NAME" \
@@ -56,7 +58,7 @@ echo ""
 # ============================================================
 # Step 2: Package e upload Lambda
 # ============================================================
-echo "→ [2/4] Package e upload Lambda..."
+echo "→ [2/5] Package e upload Lambda (admin API)..."
 
 TMP_ZIP="/tmp/admin_api_$$.zip"
 
@@ -85,13 +87,47 @@ aws lambda update-function-code \
   --region "$REGION" --profile "$PROFILE" \
   --output text --query 'FunctionArn' > /dev/null
 
-echo "✓ Lambda aggiornata"
+echo "✓ Lambda admin aggiornata"
 echo ""
 
 # ============================================================
-# Step 3: Upload SPA
+# Step 3: Package e upload Lambda daily export
 # ============================================================
-echo "→ [3/4] Upload SPA..."
+echo "→ [3/5] Package e upload Lambda (daily export)..."
+
+TMP_ZIP_EXPORT="/tmp/admin_export_$$.zip"
+
+if command -v zip &> /dev/null; then
+  TMP_DIR_EXPORT=$(mktemp -d)
+  cp "$LAMBDA_EXPORT_SRC" "$TMP_DIR_EXPORT/index.py"
+  (cd "$TMP_DIR_EXPORT" && zip -q "$TMP_ZIP_EXPORT" index.py)
+  rm -rf "$TMP_DIR_EXPORT"
+else
+  python3 -c "
+import zipfile
+with zipfile.ZipFile('$TMP_ZIP_EXPORT', 'w', zipfile.ZIP_DEFLATED) as z:
+    z.write('$LAMBDA_EXPORT_SRC', 'index.py')
+"
+fi
+
+aws s3 cp "$TMP_ZIP_EXPORT" "s3://$ARTIFACTS_BUCKET/$LAMBDA_EXPORT_S3_KEY" \
+  --sse AES256 --region "$REGION" --profile "$PROFILE"
+rm -f "$TMP_ZIP_EXPORT"
+
+aws lambda update-function-code \
+  --function-name ClaudeCode-DailyExport \
+  --s3-bucket "$ARTIFACTS_BUCKET" \
+  --s3-key "$LAMBDA_EXPORT_S3_KEY" \
+  --region "$REGION" --profile "$PROFILE" \
+  --output text --query 'FunctionArn' > /dev/null
+
+echo "✓ Lambda daily export aggiornata"
+echo ""
+
+# ============================================================
+# Step 4: Upload SPA
+# ============================================================
+echo "→ [4/5] Upload SPA..."
 
 API_ENDPOINT=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" --region "$REGION" --profile "$PROFILE" \
@@ -145,7 +181,7 @@ echo ""
 # ============================================================
 # Step 4: CloudFront invalidation
 # ============================================================
-echo "→ [4/4] Invalidazione CloudFront..."
+echo "→ [5/5] Invalidazione CloudFront..."
 
 aws cloudfront create-invalidation \
   --distribution-id "$CF_DISTRIBUTION_ID" \
