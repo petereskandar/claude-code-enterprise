@@ -33,6 +33,25 @@ This fork extends the official guidance with additional components for enterpris
 | **Metrics Aggregation** | EventBridge-scheduled Lambda that aggregates OTel logs into CloudWatch custom metrics (namespace `ClaudeCode`) at 5-minute intervals | `claude-code-metrics-aggregation` |
 | **Logs Insights Queries** | 19 pre-built CloudWatch Logs Insights queries: real-time TPM/RPM, cost analysis by user/model, cache hit rates, peak usage windows, session deep dives | `claude-code-logs-insights` |
 | **CodeBuild (Windows + Linux)** | Nuitka-based build pipeline producing standalone executables — no Python required on end-user machines | `claude-code-codebuild` |
+| **Quota Admin Dashboard** | Web portal per gli amministratori: visione aggregata dei consumi per utente/gruppo, gestione delle policy di quota, export Excel. Accesso riservato agli admin tramite Entra ID. | `claude-code-quota-admin` |
+| **User Dashboard** | Web portal per il singolo sviluppatore: consumi personali per periodo, breakdown per modello, quota utilizzata, dati organizzativi (responsabile, livelli). | `claude-code-user-dashboard` |
+| **Developer Portal** | Pagina di distribuzione dei pacchetti di installazione per Windows, macOS e Linux. Gli utenti scaricano il package corretto per la propria piattaforma direttamente da qui. | `claude-code-landing-page` |
+
+## Portali
+
+| Portale | URL | Chi lo usa |
+|---|---|---|
+| **Quota Admin** | [d2joh8epkag6jt.cloudfront.net](https://d2joh8epkag6jt.cloudfront.net) | Amministratori — overview costi, gestione policy, export dati |
+| **I Miei Consumi** | [d2vkqp5v8mw3vt.cloudfront.net](https://d2vkqp5v8mw3vt.cloudfront.net) | Sviluppatori — consumi personali, quota mensile, breakdown modelli |
+| **Developer Portal** | [1426z2s2cd.execute-api.eu-central-1.amazonaws.com/prod](https://1426z2s2cd.execute-api.eu-central-1.amazonaws.com/prod) | Sviluppatori — download pacchetti di installazione per piattaforma |
+
+Tutti i portali richiedono autenticazione con account `@posteitaliane.it` tramite Entra ID.
+
+---
+
+> **Rilasci e contributi** — vedi [`.github/workflows/RELEASE_INSTRUCTIONS.md`](.github/workflows/RELEASE_INSTRUCTIONS.md) per il processo completo di build, versionamento e distribuzione dei pacchetti.
+
+---
 
 ![CloudWatch Dashboard](assets/images/ClaudeCodeDashboard.png)
 
