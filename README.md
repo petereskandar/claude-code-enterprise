@@ -47,9 +47,24 @@ This fork extends the official guidance with additional components for enterpris
 
 Tutti i portali richiedono autenticazione con account `@posteitaliane.it` tramite Entra ID.
 
+### Quota Admin
+Visione aggregata dei consumi per utente e gruppo, gestione policy di quota (per utente, gruppo o default), export Excel con dati organizzativi.
+
+![Quota Admin Dashboard](assets/images/portal-quota-admin.png)
+
+### I Miei Consumi
+Ogni sviluppatore può verificare il proprio utilizzo per periodo, la quota mensile residua, il breakdown per modello e i dati organizzativi (responsabile, livelli gerarchici).
+
+![User Dashboard](assets/images/portal-user-dashboard.png)
+
+### Developer Portal
+Portale di distribuzione dei pacchetti di installazione. Gli sviluppatori scaricano il package per la propria piattaforma (Windows, macOS, Linux) e seguono le istruzioni di installazione.
+
+![Developer Portal](assets/images/portal-developer-portal.png)
+
 ---
 
-> **Rilasci e contributi** — vedi [`.github/workflows/RELEASE_INSTRUCTIONS.md`](.github/workflows/RELEASE_INSTRUCTIONS.md) per il processo completo di build, versionamento e distribuzione dei pacchetti.
+> **Rilasci e aggiornamenti** — vedi [`deployment/DEPLOY_GUIDE.md`](deployment/DEPLOY_GUIDE.md) per le istruzioni su come aggiornare Lambda, SPA e template CloudFormation.
 
 ---
 
