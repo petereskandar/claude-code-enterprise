@@ -1,6 +1,6 @@
 #!/bin/bash
 # Deploy script for Claude Code User Dashboard
-# Aggiorna Lambda + SPA. NON tocca CloudFormation (le risorse esistono già).
+# Steps: CloudFormation stack → Lambda zip → SPA upload → CloudFront invalidation
 # Usage: bash deploy-user-dashboard.sh [--profile <aws-profile>] [--region <region>]
 
 set -e
@@ -26,6 +26,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+TEMPLATE="$REPO_ROOT/deployment/infrastructure/user-dashboard.yaml"
 LAMBDA_SRC="$REPO_ROOT/deployment/infrastructure/lambda-functions/user_dashboard/index.py"
 SPA_DIR="$REPO_ROOT/deployment/infrastructure/lambda-functions/user_dashboard/spa"
 
@@ -37,9 +38,25 @@ echo "  Region  : $REGION"
 echo ""
 
 # ============================================================
-# Step 1: Package e upload Lambda
+# Step 1: Deploy CloudFormation stack
 # ============================================================
-echo "→ [1/3] Package e upload Lambda..."
+echo "→ [1/4] Deploy CloudFormation stack..."
+
+aws cloudformation deploy \
+  --stack-name "$STACK_NAME" \
+  --template-file "$TEMPLATE" \
+  --capabilities CAPABILITY_IAM \
+  --region "$REGION" \
+  --profile "$PROFILE" \
+  --no-fail-on-empty-changeset
+
+echo "✓ Stack aggiornato"
+echo ""
+
+# ============================================================
+# Step 2: Package e upload Lambda
+# ============================================================
+echo "→ [2/4] Package e upload Lambda..."
 
 TMP_ZIP="/tmp/user_api_$$.zip"
 
@@ -51,7 +68,7 @@ if command -v zip &> /dev/null; then
   rm -rf "$TMP_DIR"
 else
   python3 -c "
-import zipfile, sys
+import zipfile
 with zipfile.ZipFile('$TMP_ZIP', 'w', zipfile.ZIP_DEFLATED) as z:
     z.write('$LAMBDA_SRC', 'index.py')
 "
@@ -72,9 +89,9 @@ echo "✓ Lambda aggiornata"
 echo ""
 
 # ============================================================
-# Step 2: Upload SPA
+# Step 3: Upload SPA
 # ============================================================
-echo "→ [2/3] Upload SPA..."
+echo "→ [3/4] Upload SPA..."
 
 SPA_BUCKET=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" --region "$REGION" --profile "$PROFILE" \
@@ -120,9 +137,9 @@ echo "✓ SPA caricata"
 echo ""
 
 # ============================================================
-# Step 3: CloudFront invalidation
+# Step 4: CloudFront invalidation
 # ============================================================
-echo "→ [3/3] Invalidazione CloudFront..."
+echo "→ [4/4] Invalidazione CloudFront..."
 
 aws cloudfront create-invalidation \
   --distribution-id "$CF_DISTRIBUTION_ID" \
