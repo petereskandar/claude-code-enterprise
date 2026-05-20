@@ -58,7 +58,7 @@ PROVIDER_CONFIGS = {
         "name": "Azure AD",
         "authorize_endpoint": "/oauth2/v2.0/authorize",
         "token_endpoint": "/oauth2/v2.0/token",
-        "scopes": "openid profile email",
+        "scopes": "openid profile email offline_access",
         "response_type": "code",
         "response_mode": "query",
     },
@@ -509,6 +509,21 @@ class MultiProviderAuth:
         except Exception as e:
             self._debug_print(f"Could not clear keyring monitoring token: {e}")
 
+        # Clear refresh token
+        try:
+            if self.credential_storage == "keyring":
+                if keyring.get_password("claude-code-with-bedrock", f"{self.profile}-refresh-token"):
+                    keyring.set_password("claude-code-with-bedrock", f"{self.profile}-refresh-token", "EXPIRED")
+                    cleared_items.append("keyring refresh token")
+            else:
+                session_dir = Path.home() / ".claude-code-session"
+                token_file = session_dir / f"{self.profile}-refresh-token.json"
+                if token_file.exists():
+                    token_file.unlink()
+                    cleared_items.append("refresh token file")
+        except Exception as e:
+            self._debug_print(f"Could not clear refresh token: {e}")
+
         # Clear credentials file (for session storage mode)
         try:
             credentials_path = Path.home() / ".aws" / "credentials"
@@ -544,6 +559,109 @@ class MultiProviderAuth:
                 pass
 
         return cleared_items
+
+    def _save_refresh_token(self, refresh_token: str) -> None:
+        """Persist the OIDC refresh_token using the configured storage backend."""
+        try:
+            if self.credential_storage == "keyring":
+                keyring.set_password("claude-code-with-bedrock", f"{self.profile}-refresh-token", refresh_token)
+            else:
+                session_dir = Path.home() / ".claude-code-session"
+                session_dir.mkdir(parents=True, exist_ok=True)
+                token_file = session_dir / f"{self.profile}-refresh-token.json"
+                with open(token_file, "w") as f:
+                    json.dump({"refresh_token": refresh_token}, f)
+                token_file.chmod(0o600)
+        except Exception as e:
+            self._debug_print(f"Could not save refresh token: {e}")
+
+    def _load_refresh_token(self) -> str | None:
+        """Load the OIDC refresh_token from the configured storage backend. Returns None if absent or cleared."""
+        try:
+            if self.credential_storage == "keyring":
+                token = keyring.get_password("claude-code-with-bedrock", f"{self.profile}-refresh-token")
+                if token and token != "EXPIRED":
+                    return token
+            else:
+                session_dir = Path.home() / ".claude-code-session"
+                token_file = session_dir / f"{self.profile}-refresh-token.json"
+                if token_file.exists():
+                    with open(token_file) as f:
+                        data = json.load(f)
+                    token = data.get("refresh_token", "")
+                    if token and token != "EXPIRED":
+                        return token
+        except Exception as e:
+            self._debug_print(f"Could not load refresh token: {e}")
+        return None
+
+    def _exchange_refresh_token(self, refresh_token: str) -> str | None:
+        """Exchange a refresh_token for a new id_token via the OIDC /token endpoint.
+
+        On success saves the new refresh_token (sliding window) and returns the new id_token.
+        Returns None on any failure so the caller can fall back to browser auth.
+        """
+        try:
+            provider_base = self.config.get("provider_base_url", "")
+            if not provider_base:
+                # Mirror the same base_url construction used in authenticate_oidc:
+                # Azure domains end with /v2.0 which must be stripped before appending
+                # the token_endpoint (which already includes the full /oauth2/v2.0/token path).
+                provider_domain = self.config["provider_domain"]
+                if self.provider_type == "azure" and provider_domain.endswith("/v2.0"):
+                    provider_domain = provider_domain[:-5]
+                provider_base = f"https://{provider_domain}"
+            token_url = f"{provider_base}{self.provider_config['token_endpoint']}"
+
+            token_data = {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": self.config["client_id"],
+            }
+
+            # Confidential client: attach secret or certificate assertion
+            if self.config.get("client_certificate_path") and self.config.get("client_certificate_key_path"):
+                token_data["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                token_data["client_assertion"] = self._build_client_assertion(token_url)
+            elif self.config.get("client_secret"):
+                token_data["client_secret"] = self.config["client_secret"]
+
+            response = requests.post(
+                token_url,
+                data=token_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30,
+            )
+
+            if not response.ok:
+                self._debug_print(f"Refresh token exchange failed ({response.status_code}): {response.text}")
+                return None
+
+            new_tokens = response.json()
+
+            if "error" in new_tokens:
+                self._debug_print(f"Refresh token exchange error: {new_tokens.get('error')} — {new_tokens.get('error_description', '')}")
+                # Token revoked or expired — clear it so we go straight to browser next time
+                self._save_refresh_token("EXPIRED")
+                return None
+
+            new_id_token = new_tokens.get("id_token")
+            if not new_id_token:
+                self._debug_print("Refresh token exchange succeeded but no id_token in response")
+                return None
+
+            # Update sliding-window refresh_token if a new one was issued
+            new_refresh = new_tokens.get("refresh_token")
+            if new_refresh:
+                self._save_refresh_token(new_refresh)
+                self._debug_print("Refresh token rotated and saved")
+
+            self._debug_print("Refresh token exchange succeeded — new id_token obtained")
+            return new_id_token
+
+        except Exception as e:
+            self._debug_print(f"Refresh token exchange exception: {e}")
+            return None
 
     def save_monitoring_token(self, id_token, token_claims):
         """Save ID token for monitoring authentication"""
@@ -978,6 +1096,14 @@ class MultiProviderAuth:
 
         tokens = token_response.json()
 
+        # Persist refresh_token for silent re-authentication (avoids browser on every hourly renewal)
+        refresh_token = tokens.get("refresh_token")
+        if refresh_token:
+            self._save_refresh_token(refresh_token)
+            self._debug_print("Refresh token saved to keyring")
+        else:
+            self._debug_print("No refresh_token in token response (public client or policy disabled)")
+
         # Validate nonce in ID token (if provider includes it)
         id_token_claims = jwt.decode(tokens["id_token"], options={"verify_signature": False})
         if "nonce" in id_token_claims and id_token_claims.get("nonce") != nonce:
@@ -1013,7 +1139,15 @@ class MultiProviderAuth:
         class CallbackHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 parent._debug_print(f"Received callback request: {self.path}")
-                query = parse_qs(urlparse(self.path).query)
+                parsed = urlparse(self.path)
+                query = parse_qs(parsed.query)
+
+                # Ignore browser asset requests (favicon.ico, etc.) that arrive
+                # after the real callback and carry no OAuth parameters.
+                if not query.get("code") and not query.get("error") and not query.get("state"):
+                    self.send_response(204)
+                    self.end_headers()
+                    return
 
                 if query.get("error"):
                     result_container["error"] = query.get("error_description", ["Unknown error"])[0]
@@ -1998,27 +2132,51 @@ class MultiProviderAuth:
     # ===========================================
 
     def _try_silent_refresh(self):
-        """Attempt to refresh AWS credentials using a cached, still-valid OIDC id_token.
+        """Attempt to refresh AWS credentials without opening the browser.
+
+        Strategy (in order):
+          1. Cached id_token still valid  → use it directly (existing behaviour)
+          2. id_token expired but refresh_token valid → exchange for new id_token via /token
+          3. Both expired → return (None, None, None) so caller opens the browser
 
         Returns:
             Tuple of (credentials, id_token, token_claims) if successful, (None, None, None) otherwise.
         """
+        # ── Step 1: cached id_token still valid ──────────────────────────────
         try:
             id_token = self.get_monitoring_token()
-            if not id_token:
-                self._debug_print("No valid cached id_token for silent refresh")
+            if id_token:
+                self._debug_print("Found valid cached id_token, attempting silent credential refresh...")
+                token_claims = jwt.decode(id_token, options={"verify_signature": False})
+                credentials = self.get_aws_credentials(id_token, token_claims)
+                self.save_credentials(credentials)
+                self.save_monitoring_token(id_token, token_claims)
+                self._debug_print("Silent credential refresh succeeded (id_token still valid)")
+                return credentials, id_token, token_claims
+        except Exception as e:
+            self._debug_print(f"Silent refresh via cached id_token failed: {e}")
+
+        # ── Step 2: id_token expired — try refresh_token ─────────────────────
+        self._debug_print("Cached id_token absent or expired — trying refresh_token...")
+        try:
+            refresh_token = self._load_refresh_token()
+            if not refresh_token:
+                self._debug_print("No valid refresh_token in keyring")
                 return None, None, None
 
-            self._debug_print("Found valid cached id_token, attempting silent credential refresh...")
-            token_claims = jwt.decode(id_token, options={"verify_signature": False})
+            new_id_token = self._exchange_refresh_token(refresh_token)
+            if not new_id_token:
+                self._debug_print("Refresh token exchange failed or token revoked")
+                return None, None, None
 
-            credentials = self.get_aws_credentials(id_token, token_claims)
+            token_claims = jwt.decode(new_id_token, options={"verify_signature": False})
+            credentials = self.get_aws_credentials(new_id_token, token_claims)
             self.save_credentials(credentials)
-            self.save_monitoring_token(id_token, token_claims)
-            self._debug_print("Silent credential refresh succeeded")
-            return credentials, id_token, token_claims
+            self.save_monitoring_token(new_id_token, token_claims)
+            self._debug_print("Silent credential refresh succeeded (via refresh_token — no browser needed)")
+            return credentials, new_id_token, token_claims
         except Exception as e:
-            self._debug_print(f"Silent refresh failed, will require browser auth: {e}")
+            self._debug_print(f"Silent refresh via refresh_token failed: {e}")
             return None, None, None
 
     # ------------------------------------------------------------------

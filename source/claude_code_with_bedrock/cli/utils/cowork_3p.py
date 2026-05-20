@@ -57,8 +57,10 @@ def build_mdm_config(
     )
 
     return {
+        "_profile_name": profile_name,  # internal: used by generate_json for the Windows path
         "inferenceProvider": "bedrock",
         "inferenceBedrockRegion": bedrock_region,
+        "awsRegion": bedrock_region,
         "inferenceCredentialHelper": credential_helper_path,
         "inferenceCredentialHelperTtlSec": credential_helper_ttl,
         "inferenceModels": model_aliases,
@@ -97,7 +99,7 @@ def generate_claude_desktop_config(output_dir: Path, mdm_config: dict, profile_n
     config = dict(_mdm_keys(mdm_config))
     config["inferenceCredentialHelper"] = helper_abs
 
-    output = {"enterpriseConfig": config}
+    output = {"deploymentMode": "3p", "enterpriseConfig": config}
     out_path = output_dir / "claude_desktop_config.json"
     out_path.write_bytes(json.dumps(output, indent=2).encode("ascii"))
     return out_path
@@ -217,9 +219,14 @@ def generate_json(output_dir: Path, mdm_config: dict) -> Path:
 
     Returns the path to the generated file.
     """
+    config = dict(_mdm_keys(mdm_config))
+    # Use the same __USERPROFILE__ sentinel as claude_desktop_config.json so the
+    # file is portable across machines (install.bat resolves it at install time).
+    bat_name = f"credential-helper-{mdm_config.get('_profile_name', 'ClaudeCode')}.bat"
+    config["inferenceCredentialHelper"] = f"__USERPROFILE__\\claude-code-with-bedrock\\{bat_name}"
     json_path = output_dir / "cowork-3p-config.json"
     with open(json_path, "w") as f:
-        json.dump(_mdm_keys(mdm_config), f, indent=2)
+        json.dump(config, f, indent=2)
     return json_path
 
 

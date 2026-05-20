@@ -47,7 +47,7 @@ echo "→ [1/5] Deploy CloudFormation stack..."
 aws cloudformation deploy \
   --stack-name "$STACK_NAME" \
   --template-file "$TEMPLATE" \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
   --region "$REGION" \
   --profile "$PROFILE" \
   --no-fail-on-empty-changeset

@@ -388,6 +388,10 @@ Resources:
             Principal:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
@@ -408,6 +412,9 @@ Resources:
                 Action:
                   - s3:PutObject
                 Resource: !Sub '${DailyExportBucket.Arn}/daily/*'
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:ClaudeCode-DailyExport'
 
   DailyExportLogGroup:
     Type: AWS::Logs::LogGroup
@@ -437,26 +444,21 @@ Resources:
         S3Bucket: !Ref ArtifactsBucket
         S3Key: claude-code/admin/daily-export/api.zip
 
-  # EventBridge rule: every day at 23:00 UTC = midnight CET (01:00 CEST in summer)
-  # Use cron(0 23 * * ? *) for midnight CET (winter); adjust to cron(0 22 * * ? *) during CEST
-  DailyExportSchedule:
-    Type: AWS::Events::Rule
+  # EventBridge Scheduler: triggers at exactly midnight Italy time (Europe/Rome),
+  # automatically handles CET (UTC+1) and CEST (UTC+2) daylight saving transitions.
+  DailyExportScheduler:
+    Type: AWS::Scheduler::Schedule
     Properties:
       Name: ClaudeCode-DailyExport-Schedule
-      Description: Triggers daily CSV export at midnight CET
-      ScheduleExpression: 'cron(0 23 * * ? *)'
+      Description: Triggers daily CSV export at midnight Italy time (Europe/Rome)
+      ScheduleExpression: 'cron(0 0 * * ? *)'
+      ScheduleExpressionTimezone: 'Europe/Rome'
+      FlexibleTimeWindow:
+        Mode: 'OFF'
       State: ENABLED
-      Targets:
-        - Id: DailyExportLambda
-          Arn: !GetAtt DailyExportFunction.Arn
-
-  DailyExportLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref DailyExportFunction
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt DailyExportSchedule.Arn
+      Target:
+        Arn: !GetAtt DailyExportFunction.Arn
+        RoleArn: !GetAtt DailyExportRole.Arn
 
 Outputs:
   DashboardUrl:

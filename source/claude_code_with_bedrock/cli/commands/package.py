@@ -2774,12 +2774,28 @@ REM Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 set "INSTALL_DIR=%USERPROFILE%\\claude-code-with-bedrock"
 set "SCRIPT_DIR=%~dp0"
+set "IMPORT_MACHINE_POLICY=0"
+
+:parse_args
+if "%~1"=="" goto args_done
+if /I "%~1"=="--import-machine-policy" set "IMPORT_MACHINE_POLICY=1"
+shift
+goto parse_args
+
+:args_done
 
 echo ======================================
 echo Claude Code Authentication Installer
 echo ======================================
 echo.
 echo Organization: {profile.provider_domain}
+if "%IMPORT_MACHINE_POLICY%"=="1" (
+    echo Machine-wide registry policy import: enabled
+    echo NOTE: This requires Administrator privileges and is only needed for managed/shared installs.
+) else (
+    echo Machine-wide registry policy import: disabled
+    echo NOTE: Administrator privileges are not required for a personal install.
+)
 echo.
 
 REM Check prerequisites
@@ -2896,6 +2912,106 @@ if !_SETUP_RC! neq 0 (
 ) else (
     echo   OK Inference profiles configured successfully
 )
+
+echo Normalizing Claude Desktop config...
+set "CCWB_FIXUP_PS1=%TEMP%\\ccwb-fixup-%RANDOM%.ps1"
+> "%CCWB_FIXUP_PS1%" (
+    echo $ErrorActionPreference = 'Stop'
+    echo function Set-JsonProp($obj, $name, $value^) {{
+    echo ^    if ($null -eq $value^) {{ return }}
+    echo ^    if ($obj.PSObject.Properties[$name]^) {{ $obj.$name = $value }} else {{ $obj ^| Add-Member -NotePropertyName $name -NotePropertyValue $value }}
+    echo }}
+    echo function Ensure-ObjectProp($obj, $name^) {{
+    echo ^    if (-not $obj.PSObject.Properties[$name]^) {{ $obj ^| Add-Member -NotePropertyName $name -NotePropertyValue ([pscustomobject]@{{}}^) }}
+    echo ^    return $obj.$name
+    echo }}
+    echo function Read-JsonFile($path^) {{
+    echo ^    if (-not (Test-Path $path^)^) {{ return $null }}
+    echo ^    try {{ return Get-Content $path -Raw ^| ConvertFrom-Json }} catch {{ return $null }}
+    echo }}
+    echo function Clone-JsonObject($obj^) {{
+    echo ^    if ($null -eq $obj^) {{ return [pscustomobject]@{{}} }}
+    echo ^    return ^($obj ^| ConvertTo-Json -Depth 20 ^| ConvertFrom-Json^)
+    echo }}
+    echo function Write-JsonUtf8NoBom($path, $obj^) {{
+    echo ^    $utf8NoBom = New-Object System.Text.UTF8Encoding($false^)
+    echo ^    [System.IO.File]::WriteAllText($path, ($obj ^| ConvertTo-Json -Depth 20^), $utf8NoBom^)
+    echo }}
+    echo $claudeDir = Join-Path $env:LOCALAPPDATA 'Claude-3p'
+    echo $desktopConfigPath = Join-Path $claudeDir 'claude_desktop_config.json'
+    echo $configLibraryDir = Join-Path $claudeDir 'configLibrary'
+    echo $packageDesktopConfigPath = Join-Path $env:SCRIPT_DIR 'claude_desktop_config.json'
+    echo $helperPath = Join-Path $env:USERPROFILE 'claude-code-with-bedrock\\credential-helper-{profile_name}.bat'
+    echo $templateSource = Read-JsonFile $packageDesktopConfigPath
+    echo $templateConfig = Clone-JsonObject $templateSource
+    echo $templateEnterpriseConfig = Ensure-ObjectProp $templateConfig 'enterpriseConfig'
+    echo $config = Read-JsonFile $desktopConfigPath
+    echo if ($null -eq $config^) {{ $config = Clone-JsonObject $templateConfig }}
+    echo if ($null -eq $config^) {{ $config = [pscustomobject]@{{}} }}
+    echo $enterpriseConfig = Ensure-ObjectProp $config 'enterpriseConfig'
+    echo New-Item -ItemType Directory -Path $claudeDir -Force ^| Out-Null
+    echo New-Item -ItemType Directory -Path $configLibraryDir -Force ^| Out-Null
+    echo $region = $enterpriseConfig.inferenceBedrockRegion
+    echo if ([string]::IsNullOrWhiteSpace($region^)^) {{ $region = $enterpriseConfig.awsRegion }}
+    echo if ([string]::IsNullOrWhiteSpace($region^)^) {{ $region = $templateEnterpriseConfig.inferenceBedrockRegion }}
+    echo if ([string]::IsNullOrWhiteSpace($region^)^) {{ $region = $templateEnterpriseConfig.awsRegion }}
+    echo if ([string]::IsNullOrWhiteSpace($region^)^) {{ $region = '{profile.aws_region}' }}
+    echo $templateHelperPath = $null
+    echo if ($templateEnterpriseConfig.PSObject.Properties['inferenceCredentialHelper']^ -and $templateEnterpriseConfig.inferenceCredentialHelper^) {{
+    echo ^    $templateHelperPath = $templateEnterpriseConfig.inferenceCredentialHelper.ToString(^).Replace('__USERPROFILE__', $env:USERPROFILE^)
+    echo }}
+    echo $currentHelperPath = $null
+    echo if ($enterpriseConfig.PSObject.Properties['inferenceCredentialHelper']^ -and $enterpriseConfig.inferenceCredentialHelper^) {{
+    echo ^    $currentHelperPath = $enterpriseConfig.inferenceCredentialHelper.ToString(^).Replace('__USERPROFILE__', $env:USERPROFILE^)
+    echo }}
+    echo $desiredHelperPath = $null
+    echo if (Test-Path $helperPath^) {{ $desiredHelperPath = $helperPath }} elseif (-not [string]::IsNullOrWhiteSpace($templateHelperPath^)^) {{ $desiredHelperPath = $templateHelperPath }}
+    echo if (-not [string]::IsNullOrWhiteSpace($currentHelperPath^)^) {{ Set-JsonProp $enterpriseConfig 'inferenceCredentialHelper' $currentHelperPath }}
+    echo if (-not [string]::IsNullOrWhiteSpace($desiredHelperPath^) -and ([string]::IsNullOrWhiteSpace($currentHelperPath^) -or -not (Test-Path $currentHelperPath^)^)^) {{ Set-JsonProp $enterpriseConfig 'inferenceCredentialHelper' $desiredHelperPath }}
+    echo foreach ($name in 'inferenceModels','isClaudeCodeForDesktopEnabled','isDesktopExtensionEnabled','isDesktopExtensionDirectoryEnabled','isDesktopExtensionSignatureRequired','isLocalDevMcpEnabled'^) {{
+    echo ^    if (-not $enterpriseConfig.PSObject.Properties[$name]^ -and $templateEnterpriseConfig.PSObject.Properties[$name]^) {{ Set-JsonProp $enterpriseConfig $name $templateEnterpriseConfig.$name }}
+    echo }}
+    echo Set-JsonProp $config 'deploymentMode' '3p'
+    echo Set-JsonProp $enterpriseConfig 'inferenceProvider' 'bedrock'
+    echo Set-JsonProp $enterpriseConfig 'inferenceBedrockRegion' $region
+    echo Set-JsonProp $enterpriseConfig 'awsRegion' $region
+    echo if ($enterpriseConfig.inferenceCredentialHelper -and -not $enterpriseConfig.inferenceCredentialHelperTtlSec^) {{ Set-JsonProp $enterpriseConfig 'inferenceCredentialHelperTtlSec' 3600 }}
+    echo Write-JsonUtf8NoBom $desktopConfigPath $config
+    echo $metaPath = Join-Path $configLibraryDir '_meta.json'
+    echo $meta = $null
+    echo if (Test-Path $metaPath^) {{
+    echo ^    try {{ $meta = Get-Content $metaPath -Raw ^| ConvertFrom-Json }} catch {{ $meta = $null }}
+    echo }}
+    echo if ($null -eq $meta^) {{ $meta = [pscustomobject]@{{ appliedId = ''; entries = @(^) }} }}
+    echo if (-not $meta.PSObject.Properties['appliedId']^) {{ $meta ^| Add-Member -NotePropertyName 'appliedId' -NotePropertyValue '' }}
+    echo if (-not $meta.PSObject.Properties['entries']^) {{ $meta ^| Add-Member -NotePropertyName 'entries' -NotePropertyValue @(^) }}
+    echo if ([string]::IsNullOrWhiteSpace($meta.appliedId^)^) {{ $meta.appliedId = [guid]::NewGuid(^).ToString(^) }}
+    echo $entries = @($meta.entries^)
+    echo $hasAppliedEntry = $false
+    echo foreach ($candidate in $entries^) {{ if ($candidate.id -eq $meta.appliedId^) {{ $hasAppliedEntry = $true; break }} }}
+    echo if (-not $hasAppliedEntry^) {{ $meta.entries = $entries + @([pscustomobject]@{{ id = $meta.appliedId; name = 'Default' }}^) }}
+    echo $entryPath = Join-Path $configLibraryDir ($meta.appliedId + '.json'^)
+    echo if (Test-Path $entryPath^) {{
+    echo ^    try {{ $entry = Get-Content $entryPath -Raw ^| ConvertFrom-Json }} catch {{ $entry = [pscustomobject]@{{}} }}
+    echo }} else {{
+    echo ^    $entry = [pscustomobject]@{{}}
+    echo }}
+    echo Set-JsonProp $entry 'inferenceProvider' 'bedrock'
+    echo Set-JsonProp $entry 'inferenceBedrockRegion' $region
+    echo Set-JsonProp $entry 'awsRegion' $region
+    echo foreach ($name in 'inferenceCredentialHelper','inferenceCredentialHelperTtlSec','inferenceModels','isClaudeCodeForDesktopEnabled','isDesktopExtensionEnabled','isDesktopExtensionDirectoryEnabled','isDesktopExtensionSignatureRequired','isLocalDevMcpEnabled'^) {{
+    echo ^    if ($enterpriseConfig.PSObject.Properties[$name]^) {{ Set-JsonProp $entry $name $enterpriseConfig.$name }}
+    echo }}
+    echo Write-JsonUtf8NoBom $entryPath $entry
+    echo Write-JsonUtf8NoBom $metaPath $meta
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%CCWB_FIXUP_PS1%" >nul 2>&1
+if %errorlevel% equ 0 (
+    echo   OK Claude Desktop config normalized or repaired
+) else (
+    echo   WARNING: Claude Desktop config normalization skipped
+)
+del "%CCWB_FIXUP_PS1%" >nul 2>&1
 """
         # CoWork / Claude Desktop section (only when CoWork is enabled)
         if getattr(profile, "cowork_3p_enabled", True):
@@ -2912,18 +3028,29 @@ REM       The credential-helper was already copied before --setup-profiles.
 REM Optional: Apply Windows registry policy for MDM/GPO managed deployments
 REM This requires administrator privileges and targets HKLM for machine-wide policy.
 REM For personal installs, the claude_desktop_config.json above is sufficient.
-if exist "%SCRIPT_DIR%cowork-3p.reg" (
-    net session >nul 2>&1
-    if %errorlevel% equ 0 (
-        reg import "%SCRIPT_DIR%cowork-3p.reg" >nul 2>&1
+if "%IMPORT_MACHINE_POLICY%"=="1" (
+    if exist "%SCRIPT_DIR%cowork-3p.reg" (
+        net session >nul 2>&1
         if %errorlevel% equ 0 (
-            echo   OK Claude Desktop / Cowork registry policy applied (machine-wide)
+            reg import "%SCRIPT_DIR%cowork-3p.reg" >nul 2>&1
+            if %errorlevel% equ 0 (
+                reg add "HKLM\\SOFTWARE\\Policies\\Anthropic\\Claude Desktop" /v "awsRegion" /t REG_SZ /d "{profile.aws_region}" /f >nul 2>&1
+                if %errorlevel% equ 0 (
+                    echo   OK Claude Desktop / Cowork registry policy applied (machine-wide^)
+                ) else (
+                    echo   WARNING: Registry policy imported but awsRegion patch failed
+                )
+            ) else (
+                echo   WARNING: Registry import failed
+            )
         ) else (
-            echo   WARNING: Registry import failed
+            echo   WARNING: --import-machine-policy was requested but this installer is not running as Administrator
         )
     ) else (
-        echo   NOTE: Skipping machine-wide registry policy (not running as Administrator)
+        echo   NOTE: Skipping machine-wide registry policy (cowork-3p.reg not found^)
     )
+) else (
+    echo   NOTE: Skipping machine-wide registry policy (personal install default^)
 )
 """
 
@@ -2947,6 +3074,9 @@ echo   set AWS_PROFILE={profile_name}
 echo   aws sts get-caller-identity
 echo.
 echo Note: Authentication will automatically open your browser when needed.
+echo.
+echo For machine-wide Claude Desktop policy, rerun as Administrator with:
+echo   install.bat --import-machine-policy
 echo.
 pause
 """
